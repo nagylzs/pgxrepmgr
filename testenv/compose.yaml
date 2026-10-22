@@ -1,0 +1,60 @@
+# Three-node repmgr cluster for testing pgxrepmgr. Use cluster.sh rather than docker compose directly.
+#
+# The nodes register themselves in repmgr.nodes by IP address. On Linux the host can reach those
+# addresses directly, so the Go code under test can run on the host without any port mapping.
+name: pgxrepmgr-test
+
+x-node: &node
+  build: .
+  image: pgxrepmgr-testnode:17
+  init: true
+  cap_add: [NET_ADMIN]
+  stop_grace_period: 20s
+
+x-env: &env
+  PRIMARY_HOST: 172.28.0.11
+  REPMGR_PASSWORD: repmgr
+
+services:
+  node1:
+    <<: *node
+    hostname: node1
+    networks:
+      repmgr:
+        ipv4_address: 172.28.0.11
+    environment:
+      <<: *env
+      NODE_ID: 1
+      NODE_NAME: node1
+      NODE_HOST: 172.28.0.11
+
+  node2:
+    <<: *node
+    hostname: node2
+    networks:
+      repmgr:
+        ipv4_address: 172.28.0.12
+    environment:
+      <<: *env
+      NODE_ID: 2
+      NODE_NAME: node2
+      NODE_HOST: 172.28.0.12
+
+  node3:
+    <<: *node
+    hostname: node3
+    networks:
+      repmgr:
+        ipv4_address: 172.28.0.13
+    environment:
+      <<: *env
+      NODE_ID: 3
+      NODE_NAME: node3
+      NODE_HOST: 172.28.0.13
+      NODE_PRIORITY: 50
+
+networks:
+  repmgr:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
