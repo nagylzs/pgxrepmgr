@@ -58,19 +58,24 @@ import (
 )
 
 func main() {
-	// The connector checks the nodes as the repmgr user, in the repmgr database. Any user that can read
-	// repmgr.nodes will do.
+	// The connector checks the nodes as the repmgr user, in the repmgr
+	// database. Any user that can read repmgr.nodes will do.
 	opts := pgxrepmgr.NewOptions("repmgr", "repmgr_password").
-		// Check overrides are applied to the conninfo from repmgr.nodes when the connector checks a node
+		// Check overrides are applied to the conninfo from repmgr.nodes
+		// when the connector checks a node
 		WithCheckOverride("application_name", "myapp-pgxrepmgr").
-		// App overrides are applied to the conninfo that Primary, Nearest and Nodes return, and Pool uses
+		// App overrides are applied to the conninfo that Primary,
+		// Nearest and Nodes return, and Pool uses
 		WithAppOverride("user", "app").
 		WithAppOverride("password", "app password").
 		WithAppOverride("dbname", "app").
-		WithCheckInterval(10 * time.Second). // optional
-		WithMaxLagBytes(64 << 20)            // optional, Nearest skips the standbys further behind
+		// Optional
+		WithCheckInterval(10 * time.Second).
+		// Optional, Nearest skips the standbys further behind
+		WithMaxLagBytes(64 << 20)
 
-	// One or more seeds. The connector discovers the other nodes from their repmgr.nodes.
+	// One or more seeds. The connector discovers the other nodes from
+	// their repmgr.nodes.
 	rc := pgxrepmgr.NewConnector(opts, "host=pg1.example.com", "host=pg2.example.com")
 	defer rc.Close()
 
@@ -201,15 +206,27 @@ type NodeInfo struct {
 	SlotName       string
 	ConfigFile     string
 
-	IsPrimary     bool          // the node claims to be the primary: its own row says so, and it is writable
-	Avail         bool          // the node can be used: it answered, and its own row in repmgr.nodes is active
-	InRecovery    bool          // the node is in recovery (a standby)
-	Timeline      int           // the timeline the node writes WAL on (0 when InRecovery)
-	LagBytes      int64         // bytes of WAL the node had yet to replay, compared to the primary (0 for the primary, -1 if unknown)
-	Latency       time.Duration // how long connecting took at the last check (0 if it failed)
-	FetchDuration time.Duration // the time it took to fetch the node's state and repmgr.nodes
-	LastChecked   time.Time     // time of the last check
-	LastError     error         // why the node is not available (nil when Avail)
+	// The node claims to be the primary: its own row says so, and it is
+	// writable
+	IsPrimary bool
+	// The node can be used: it answered, and its own row in repmgr.nodes
+	// is active
+	Avail bool
+	// The node is in recovery (a standby)
+	InRecovery bool
+	// The timeline the node writes WAL on (0 when InRecovery)
+	Timeline int
+	// Bytes of WAL the node had yet to replay, compared to the primary
+	// (0 for the primary, -1 if unknown)
+	LagBytes int64
+	// How long connecting took at the last check (0 if it failed)
+	Latency time.Duration
+	// The time it took to fetch the node's state and repmgr.nodes
+	FetchDuration time.Duration
+	// Time of the last check
+	LastChecked time.Time
+	// Why the node is not available (nil when Avail)
+	LastError error
 }
 ```
 
@@ -268,9 +285,12 @@ your connections go straight to the database.
 with repmgr 5.5 and automatic failover in docker, and integration tests that use it (on Linux):
 
 ```sh
-go test -tags integration -v ./testenv # starts the cluster if needed
-testenv/cluster.sh                      # lists the commands to control the cluster
-go run ./testenv/watch -write           # prints every change of the primary and the nearest node
+# Run the integration tests. They start the cluster if needed.
+go test -tags integration -v ./testenv
+# List the commands that control the cluster
+testenv/cluster.sh
+# Print every change of the primary and the nearest node
+go run ./testenv/watch -write
 ```
 
 ## License
