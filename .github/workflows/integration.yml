@@ -1,0 +1,36 @@
+name: Integration
+
+# The failover tests depend on timing, so they don't run on every pull request.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      # cluster.sh delay adds latency with netem, which needs the kernel module on the host
+      - name: Load the netem module
+        run: |
+          sudo modprobe sch_netem || {
+            sudo apt-get update
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe sch_netem
+          }
+      - name: Integration tests
+        run: go test -tags integration -v -count=1 ./testenv
+      - name: Cluster state and logs
+        if: failure()
+        run: |
+          testenv/cluster.sh show || true
+          docker compose -f testenv/compose.yaml logs --no-color --timestamps

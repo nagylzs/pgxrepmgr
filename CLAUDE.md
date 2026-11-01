@@ -19,6 +19,8 @@ go run ./testenv/watch -write          # run a Connector against it and print ev
 testenv/cluster.sh down                # remove the cluster and its data
 ```
 
+CI runs on GitHub Actions. `.github/workflows/ci.yml` runs on every push and pull request: gofmt, `go vet` (with and without the `integration` tag) and `go test -race ./...` on Go 1.25 (the minimum in `go.mod`) and the current release, plus staticcheck and govulncheck at pinned versions. `.github/workflows/integration.yml` runs the integration tests on pushes to `main` and by hand (`gh workflow run integration.yml`), not on pull requests, because the failover tests depend on timing.
+
 `go test ./...` runs only the unit tests, which need no database (`*_test.go` at the root). They use seeds where nothing listens (`closedPort`) or where a server accepts connections and never answers (`hangingServer`). The integration tests in `testenv/` need the `integration` build tag.
 
 ## Test environment (`testenv/`)
