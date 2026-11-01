@@ -92,7 +92,16 @@ init_standby() {
     done
     repmgr -f "$CONF" -h "$PRIMARY_HOST" -U repmgr -d repmgr standby clone --fast-checkpoint
     start_postgres
-    repmgr -f "$CONF" standby register
+    # Right after the start, the standby may still be catching up, and repmgr refuses to register a
+    # standby that isn't streaming yet.
+    local attempt
+    for attempt in $(seq 30); do
+        repmgr -f "$CONF" standby register && return
+        echo "Registration failed (attempt $attempt), retrying..."
+        sleep 1
+    done
+    echo "Could not register $NODE_NAME" >&2
+    exit 1
 }
 
 if [ ! -s "$PGDATA/PG_VERSION" ]; then
