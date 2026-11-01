@@ -10,13 +10,13 @@ import (
 // spaces are the characters that separate the key=value pairs of a connection string.
 const spaces = " \t\n\v\f\r"
 
-// ParseConnString parses a key=value PostgreSQL connection string into a map, for example
+// ParseDSN parses a key=value PostgreSQL connection string into a map, for example
 // "host=db.example.com port=5432 password='my secret'". A value can be in single quotes, and a
 // backslash escapes a quote or a backslash, the same way pgx parses them. URLs (postgres://...) are
 // not supported. The error doesn't contain the connection string, because it may contain a password.
-func ParseConnString(conninfo string) (map[string]string, error) {
+func ParseDSN(dsn string) (map[string]string, error) {
 	parts := make(map[string]string)
-	s := conninfo
+	s := dsn
 	for {
 		s = strings.TrimLeft(s, spaces)
 		if s == "" {
@@ -75,10 +75,9 @@ func ParseConnString(conninfo string) (map[string]string, error) {
 	}
 }
 
-// BuildConnString builds a PostgreSQL connection string from a map of strings.
-// It always sorts DSN values by their keys, so you will get the same DSN if
-// the map contains the same key-value pairs. It quotes the values that need it.
-func BuildConnString(parts map[string]string) string {
+// BuildDSN builds a key=value PostgreSQL connection string from a map. It sorts the keys, so the
+// same map always gives the same string, and it quotes the values that need it.
+func BuildDSN(parts map[string]string) string {
 	keys := make([]string, 0, len(parts))
 	for k := range parts {
 		keys = append(keys, k)
@@ -100,42 +99,44 @@ func quoteValue(v string) string {
 	return "'" + strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(v) + "'"
 }
 
-// ReplaceInDsn sets the keys of changes in a PostgreSQL connection string. The result is normalized
-// (see BuildConnString).
-func ReplaceInDsn(dsn string, changes map[string]string) (string, error) {
-	parts, err := ParseConnString(dsn)
+// ReplaceInDSN sets the keys of changes in a PostgreSQL connection string. The result is normalized
+// (see BuildDSN).
+func ReplaceInDSN(dsn string, changes map[string]string) (string, error) {
+	parts, err := ParseDSN(dsn)
 	if err != nil {
 		return "", err
 	}
 	for name, value := range changes {
 		parts[name] = value
 	}
-	return BuildConnString(parts), nil
+	return BuildDSN(parts), nil
 }
 
-// DsnWithHostPort replaces the host and port of a PostgreSQL connection string
-func DsnWithHostPort(dsn string, host string, port uint16) (string, error) {
-	return ReplaceInDsn(dsn, map[string]string{
+// DSNWithHostPort replaces the host and the port in a PostgreSQL connection string. The result is
+// normalized (see BuildDSN).
+func DSNWithHostPort(dsn string, host string, port uint16) (string, error) {
+	return ReplaceInDSN(dsn, map[string]string{
 		"host": host,
 		"port": strconv.Itoa(int(port)),
 	})
 }
 
-// DsnWithDatabase replaces the database name of a PostgreSQL connection string
-func DsnWithDatabase(dsn string, database string) (string, error) {
-	return ReplaceInDsn(dsn, map[string]string{
+// DSNWithDatabase replaces the database name in a PostgreSQL connection string. The result is
+// normalized (see BuildDSN).
+func DSNWithDatabase(dsn string, database string) (string, error) {
+	return ReplaceInDSN(dsn, map[string]string{
 		"dbname": database,
 	})
 }
 
-// RemoveSensitiveFromDsn removes the user and the password from a PostgreSQL connection string, for
+// RemoveSensitiveFromDSN removes the user and the password from a PostgreSQL connection string, for
 // example to log it.
-func RemoveSensitiveFromDsn(dsn string) (string, error) {
-	parts, err := ParseConnString(dsn)
+func RemoveSensitiveFromDSN(dsn string) (string, error) {
+	parts, err := ParseDSN(dsn)
 	if err != nil {
 		return "", err
 	}
 	delete(parts, "user")
 	delete(parts, "password")
-	return BuildConnString(parts), nil
+	return BuildDSN(parts), nil
 }

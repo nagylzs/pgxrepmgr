@@ -7,7 +7,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func TestParseConnString(t *testing.T) {
+func TestParseDSN(t *testing.T) {
 	for _, tc := range []struct {
 		conninfo string
 		want     map[string]string
@@ -24,24 +24,24 @@ func TestParseConnString(t *testing.T) {
 		{"options='' host=a", map[string]string{"options": "", "host": "a"}},
 		{"host=a host=b", map[string]string{"host": "b"}},
 	} {
-		got, err := ParseConnString(tc.conninfo)
+		got, err := ParseDSN(tc.conninfo)
 		if err != nil {
-			t.Errorf("ParseConnString(%q): %v", tc.conninfo, err)
+			t.Errorf("ParseDSN(%q): %v", tc.conninfo, err)
 		} else if !maps.Equal(got, tc.want) {
-			t.Errorf("ParseConnString(%q) = %q, want %q", tc.conninfo, got, tc.want)
+			t.Errorf("ParseDSN(%q) = %q, want %q", tc.conninfo, got, tc.want)
 		}
 	}
 	for _, conninfo := range []string{"host", "host=a port", "=a", "password='secret", `password=secret\`} {
-		if got, err := ParseConnString(conninfo); err == nil {
-			t.Errorf("ParseConnString(%q) = %q, want an error", conninfo, got)
+		if got, err := ParseDSN(conninfo); err == nil {
+			t.Errorf("ParseDSN(%q) = %q, want an error", conninfo, got)
 		}
 	}
 }
 
-// pgx reads the values that BuildConnString writes as they were.
-func TestBuildConnStringQuotes(t *testing.T) {
+// pgx reads the values that BuildDSN writes as they were.
+func TestBuildDSNQuotes(t *testing.T) {
 	password := `a b'c\d!`
-	conninfo := BuildConnString(map[string]string{"host": "a", "password": password, "options": ""})
+	conninfo := BuildDSN(map[string]string{"host": "a", "password": password, "options": ""})
 	if want := `host=a options='' password='a b\'c\\d!'`; conninfo != want {
 		t.Errorf("got %s, want %s", conninfo, want)
 	}
@@ -52,17 +52,17 @@ func TestBuildConnStringQuotes(t *testing.T) {
 	if cfg.Password != password {
 		t.Errorf("pgx read the password %q, want %q", cfg.Password, password)
 	}
-	parts, err := ParseConnString(conninfo)
+	parts, err := ParseDSN(conninfo)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if parts["password"] != password {
-		t.Errorf("ParseConnString read the password %q, want %q", parts["password"], password)
+		t.Errorf("ParseDSN read the password %q, want %q", parts["password"], password)
 	}
 }
 
-func TestDsnWithDatabase(t *testing.T) {
-	dsn, err := DsnWithDatabase("host=a dbname=repmgr", "app")
+func TestDSNWithDatabase(t *testing.T) {
+	dsn, err := DSNWithDatabase("host=a dbname=repmgr", "app")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,6 +71,6 @@ func TestDsnWithDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Database != "app" {
-		t.Errorf("DsnWithDatabase gave %q, pgx connects to database %q, want app", dsn, cfg.Database)
+		t.Errorf("DSNWithDatabase gave %q, pgx connects to database %q, want app", dsn, cfg.Database)
 	}
 }

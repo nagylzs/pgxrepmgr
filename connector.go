@@ -13,8 +13,9 @@ import (
 	"log/slog"
 )
 
-// Connector monitors the status of a PostgreSQL repmgr cluster, and provides instant
-// access to connection parameters for the primary (writable) and nearest (lowest latency) instances.
+// Connector monitors a PostgreSQL repmgr cluster in the background, and returns the primary node
+// (the writable one) and the nearest node (the one with the lowest connect latency) without waiting.
+// It is safe for concurrent use.
 type Connector struct {
 	mu                  sync.Mutex
 	relay               *broadcast.Relay[struct{}]
@@ -59,10 +60,10 @@ func NewConnector(opt Options, connStrings ...string) *Connector {
 	}
 	initial := make([]NodeInfo, 0)
 	for _, d := range connStrings {
-		if _, err := ParseConnString(d); err != nil {
+		if _, err := ParseDSN(d); err != nil {
 			panic(fmt.Sprintf("invalid seed: %v", err))
 		}
-		initial = append(initial, NodeInfo{NodeId: InvalidNodeId, ConnInfo: d})
+		initial = append(initial, NodeInfo{NodeID: InvalidNodeID, ConnInfo: d})
 	}
 	// The caller may change the maps later
 	opt.CheckOverrides = maps.Clone(opt.CheckOverrides)
@@ -137,10 +138,11 @@ func (c *Connector) Logger() *slog.Logger {
 	return c.options.Logger
 }
 
-// Nearest returns NodeInfo for the nearest node. (thread safe)
+// Nearest returns the nearest available node: the one with the lowest connect latency, which may be
+// the primary or a standby (see Options.WithMaxLagBytes).
 //
-// If there is no nearest node available, then the result will have Avail=false, NodeId=InvalidNodeId
-// and LastError=ErrNoNode (ErrClosed after Close).
+// If no node is available, the result has Avail=false, NodeID=InvalidNodeID and
+// LastError=ErrNoNode (ErrClosed after Close).
 func (c *Connector) Nearest() NodeInfo {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -149,18 +151,18 @@ func (c *Connector) Nearest() NodeInfo {
 
 func (c *Connector) nearestNoLock() NodeInfo {
 	if c.closed {
-		return NodeInfo{NodeId: InvalidNodeId, Avail: false, LastError: ErrClosed}
+		return NodeInfo{NodeID: InvalidNodeID, Avail: false, LastError: ErrClosed}
 	} else if c.nearestIdx < 0 {
-		return NodeInfo{NodeId: InvalidNodeId, Avail: false, LastError: ErrNoNode}
+		return NodeInfo{NodeID: InvalidNodeID, Avail: false, LastError: ErrNoNode}
 	} else {
 		return c.forApp(c.nodes[c.nearestIdx])
 	}
 }
 
-// Primary returns NodeInfo for the primary node (thread safe)
+// Primary returns the primary node.
 //
-// If there is no primary node available, then the result will have Avail=false, NodeId=InvalidNodeId
-// and LastError=ErrNoPrimary (ErrClosed after Close).
+// If there is no primary, the result has Avail=false, NodeID=InvalidNodeID and
+// LastError=ErrNoPrimary (ErrClosed after Close).
 func (c *Connector) Primary() NodeInfo {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -169,16 +171,16 @@ func (c *Connector) Primary() NodeInfo {
 
 func (c *Connector) primaryNoLock() NodeInfo {
 	if c.closed {
-		return NodeInfo{NodeId: InvalidNodeId, Avail: false, LastError: ErrClosed}
+		return NodeInfo{NodeID: InvalidNodeID, Avail: false, LastError: ErrClosed}
 	} else if c.primaryIdx < 0 {
-		return NodeInfo{NodeId: InvalidNodeId, Avail: false, LastError: ErrNoPrimary}
+		return NodeInfo{NodeID: InvalidNodeID, Avail: false, LastError: ErrNoPrimary}
 	} else {
 		return c.forApp(c.nodes[c.primaryIdx])
 	}
 }
 
 // Nodes returns all nodes that the last check found, including the ones that are not available, with
-// AppOverrides applied like for Primary and Nearest. After Close, it returns nil. (thread safe)
+// AppOverrides applied like for Primary and Nearest. After Close, it returns nil.
 func (c *Connector) Nodes() []NodeInfo {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -194,7 +196,7 @@ func (c *Connector) Nodes() []NodeInfo {
 
 // forApp returns n with AppOverrides applied to its ConnInfo.
 func (c *Connector) forApp(n NodeInfo) NodeInfo {
-	connInfo, err := ReplaceInDsn(n.ConnInfo, c.options.AppOverrides)
+	connInfo, err := ReplaceInDSN(n.ConnInfo, c.options.AppOverrides)
 	if err != nil {
 		// Only if repmgr.nodes changed it since the connector connected with it
 		n.Avail, n.LastError = false, err
@@ -204,10 +206,10 @@ func (c *Connector) forApp(n NodeInfo) NodeInfo {
 	return n
 }
 
-// WaitForPrimary wait for the primary node to become available.
+// WaitForPrimary waits until there is a primary, and returns it.
 //
-// If the context is done, then it will return a NodeInfo that has Avail=false, NodeId=InvalidNodeId
-// and LastError=ctx.Err() (LastError=ErrClosed if the connector is closed).
+// If ctx is done first, the result has Avail=false, NodeID=InvalidNodeID and LastError=ctx.Err()
+// (ErrClosed if the connector is closed).
 func (c *Connector) WaitForPrimary(ctx context.Context) NodeInfo {
 	l := c.relay.Listener(1)
 	defer l.Close()
@@ -221,18 +223,17 @@ func (c *Connector) WaitForPrimary(ctx context.Context) NodeInfo {
 		case <-l.Ch():
 			continue
 		case <-ctx.Done():
-			return NodeInfo{NodeId: InvalidNodeId, Avail: false, LastError: ctx.Err()}
+			return NodeInfo{NodeID: InvalidNodeID, Avail: false, LastError: ctx.Err()}
 		case <-c.done:
-			return NodeInfo{NodeId: InvalidNodeId, Avail: false, LastError: ErrClosed}
+			return NodeInfo{NodeID: InvalidNodeID, Avail: false, LastError: ErrClosed}
 		}
 	}
 }
 
-// WaitForNearest wait until a node becomes available.
+// WaitForNearest waits until a node is available, and returns the nearest one (see Nearest).
 //
-// When multiple nodes are available, then it returns the one with the lowest latency.
-// If the context is done, then it will return a NodeInfo that has Avail=false, NodeId=InvalidNodeId
-// and LastError=ctx.Err() (LastError=ErrClosed if the connector is closed).
+// If ctx is done first, the result has Avail=false, NodeID=InvalidNodeID and LastError=ctx.Err()
+// (ErrClosed if the connector is closed).
 func (c *Connector) WaitForNearest(ctx context.Context) NodeInfo {
 	l := c.relay.Listener(1)
 	defer l.Close()
@@ -246,9 +247,9 @@ func (c *Connector) WaitForNearest(ctx context.Context) NodeInfo {
 		case <-l.Ch():
 			continue
 		case <-ctx.Done():
-			return NodeInfo{NodeId: InvalidNodeId, Avail: false, LastError: ctx.Err()}
+			return NodeInfo{NodeID: InvalidNodeID, Avail: false, LastError: ctx.Err()}
 		case <-c.done:
-			return NodeInfo{NodeId: InvalidNodeId, Avail: false, LastError: ErrClosed}
+			return NodeInfo{NodeID: InvalidNodeID, Avail: false, LastError: ErrClosed}
 		}
 	}
 }
@@ -260,25 +261,24 @@ func (c *Connector) logCheckError(ctx context.Context, msg string) {
 	}
 }
 
-// checkNodeResult represents the information that can be retrieved from a single node
+// checkNodeResult is what checkNode found out from a single node.
 type checkNodeResult struct {
 	Connected NodeInfo   // Info about the node that was actually connected to retrieve the statuses
 	nodes     []NodeInfo // All nodes, queried from repmgr.nodes
 }
 
-// connect to a dsn, fetch repmgr.nodes and return a checkNodeResult
-//
-// You can set nodeid to InvalidNodeId if you only have a dsn.
-func (c *Connector) checkNode(ctx context.Context, nodeId int, dsn string) (res checkNodeResult) {
+// checkNode connects to dsn, and reads the node's state and repmgr.nodes. nodeID is InvalidNodeID
+// for a seed.
+func (c *Connector) checkNode(ctx context.Context, nodeID int, dsn string) (res checkNodeResult) {
 	started := time.Now()
 	res.Connected = NodeInfo{
-		NodeId: nodeId, ConnInfo: dsn, IsPrimary: false, Avail: false,
+		NodeID: nodeID, ConnInfo: dsn, IsPrimary: false, Avail: false,
 		LastChecked: started, LastError: nil}
 	res.nodes = make([]NodeInfo, 0)
 	ctx2, cancel := context.WithTimeout(ctx, c.options.ConnectTimeout)
 	defer cancel()
 	// Try to connect to the node
-	dsn2, err := ReplaceInDsn(dsn, c.options.CheckOverrides)
+	dsn2, err := ReplaceInDSN(dsn, c.options.CheckOverrides)
 	if err != nil {
 		res.Connected.LastError = err
 		c.logCheckError(ctx, err.Error())
@@ -338,7 +338,7 @@ func (c *Connector) checkNode(ctx context.Context, nodeId int, dsn string) (res 
 		nodes, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (NodeInfo, error) {
 			var node NodeInfo
 			err := row.Scan(
-				&node.NodeId, &node.UpstreamNodeId, &node.Active, &node.NodeName, &node.Type, &node.Location,
+				&node.NodeID, &node.UpstreamNodeID, &node.Active, &node.NodeName, &node.Type, &node.Location,
 				&node.Priority, &node.ConnInfo, &node.ReplUser, &node.SlotName, &node.ConfigFile)
 			return node, err
 		})
@@ -355,7 +355,7 @@ func (c *Connector) checkNode(ctx context.Context, nodeId int, dsn string) (res 
 		node.IsPrimary = node.Type == "primary"
 		node.Avail = false
 		node.LastChecked = time.Now()
-		if node.NodeId == res.Connected.NodeId && node.Active {
+		if node.NodeID == res.Connected.NodeID && node.Active {
 			node.Avail = true
 			node.Latency = res.Connected.Latency
 			node.InRecovery = inRecovery
@@ -370,7 +370,7 @@ func (c *Connector) checkNode(ctx context.Context, nodeId int, dsn string) (res 
 		// After a failover, the old primary's row stays type=primary with active=false.
 		if node.Type == "primary" && node.Active {
 			if hadPrimary {
-				c.Logger().Error("rogue primary", "node_id", node.NodeId)
+				c.Logger().Error("rogue primary", "node_id", node.NodeID)
 			} else {
 				hadPrimary = true
 			}
@@ -378,7 +378,7 @@ func (c *Connector) checkNode(ctx context.Context, nodeId int, dsn string) (res 
 		res.nodes = append(res.nodes, node)
 	}
 	if !res.Connected.Avail {
-		if nodeId == InvalidNodeId {
+		if nodeID == InvalidNodeID {
 			res.Connected.LastError = errors.New("a seed is only used to discover the nodes in its repmgr.nodes")
 		} else {
 			res.Connected.LastError = errors.New("the node's own row in repmgr.nodes is missing or inactive")
@@ -394,7 +394,7 @@ func (c *Connector) collectInfos(ctx context.Context, src []NodeInfo) []checkNod
 	wg := sync.WaitGroup{}
 	wg.Add(len(src))
 	for _, n := range src {
-		nid, coni := n.NodeId, n.ConnInfo
+		nid, coni := n.NodeID, n.ConnInfo
 		go func() {
 			ci <- c.checkNode(ctx, nid, coni)
 			wg.Done()
@@ -429,7 +429,7 @@ func (c *Connector) selectPrimary(nodes []NodeInfo) int {
 		// The node ID only breaks a tie (two standbys promoted from the same timeline), so that the
 		// choice doesn't depend on the order in which the checks finished.
 		if primaryIdx < 0 || n.Timeline > nodes[primaryIdx].Timeline ||
-			n.Timeline == nodes[primaryIdx].Timeline && n.NodeId < nodes[primaryIdx].NodeId {
+			n.Timeline == nodes[primaryIdx].Timeline && n.NodeID < nodes[primaryIdx].NodeID {
 			primaryIdx = idx
 		}
 	}
@@ -445,7 +445,7 @@ func (c *Connector) selectPrimary(nodes []NodeInfo) int {
 		n.Avail = false
 		n.LastError = fmt.Errorf(
 			"split brain: node %v (%v) on timeline %v claims to be primary, but node %v (%v) on timeline %v is the primary",
-			n.NodeId, n.NodeName, n.Timeline, primary.NodeId, primary.NodeName, primary.Timeline)
+			n.NodeID, n.NodeName, n.Timeline, primary.NodeID, primary.NodeName, primary.Timeline)
 		c.Logger().Error(n.LastError.Error())
 	}
 	return primaryIdx
@@ -457,16 +457,16 @@ func (c *Connector) selectPrimary(nodes []NodeInfo) int {
 func withoutRemoved(nodes []NodeInfo, primaryIdx int, listed []NodeInfo) ([]NodeInfo, int, []NodeInfo) {
 	inList := make(map[int]bool)
 	for _, n := range listed {
-		inList[n.NodeId] = true
+		inList[n.NodeID] = true
 	}
-	primaryId := nodes[primaryIdx].NodeId
+	primaryID := nodes[primaryIdx].NodeID
 	kept, removed := make([]NodeInfo, 0, len(nodes)), make([]NodeInfo, 0)
 	for _, n := range nodes {
-		if !inList[n.NodeId] {
+		if !inList[n.NodeID] {
 			removed = append(removed, n)
 			continue
 		}
-		if n.NodeId == primaryId {
+		if n.NodeID == primaryID {
 			primaryIdx = len(kept)
 		}
 		kept = append(kept, n)
@@ -580,19 +580,19 @@ func (c *Connector) check() bool {
 	cMap := make(map[int]NodeInfo)
 	for _, result := range results {
 		i := result.Connected
-		cMap[i.NodeId] = i
+		cMap[i.NodeID] = i
 	}
 	// Collect new nodes that appeared since last check
 	cNew := make(map[int]NodeInfo)
 	newNodes := make([]NodeInfo, 0)
 	for _, result := range results {
 		for _, seen := range result.nodes {
-			_, exists := cMap[seen.NodeId]
+			_, exists := cMap[seen.NodeID]
 			if !exists {
-				_, exists = cNew[seen.NodeId]
+				_, exists = cNew[seen.NodeID]
 			}
 			if !exists {
-				cNew[seen.NodeId] = seen
+				cNew[seen.NodeID] = seen
 				newNodes = append(newNodes, seen)
 				c.Logger().Info("New node discovered", "node", seen.String())
 			}
@@ -644,11 +644,11 @@ func (c *Connector) check() bool {
 	// Notify waiters
 	c.relay.Broadcast(struct{}{})
 
-	if prevNearest.NodeId != nearest.NodeId {
+	if prevNearest.NodeID != nearest.NodeID {
 		// Nearest can change anytime, this is just a debug message
 		c.Logger().Debug("Nearest changed", "node", c.Nearest().String())
 	}
-	if prevPrimary.NodeId != primary.NodeId {
+	if prevPrimary.NodeID != primary.NodeID {
 		// Primary change is serious, this is a warning
 		c.Logger().Warn("Primary changed", "node", c.Primary().String())
 	}
@@ -663,11 +663,11 @@ func (c *Connector) removalCount() int {
 }
 
 // knows reports whether the connector checks the node with the given ID.
-func (c *Connector) knows(nodeId int) bool {
+func (c *Connector) knows(nodeID int) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, n := range c.nodes {
-		if n.NodeId == nodeId {
+		if n.NodeID == nodeID {
 			return true
 		}
 	}

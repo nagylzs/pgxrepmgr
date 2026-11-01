@@ -55,7 +55,7 @@ func main() {
 		WithAppOverride("sslmode", "disable").
 		WithLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 	rc := pgxrepmgr.NewConnector(opts, seeds...)
-	pool := pgxrepmgr.NewPool(rc, pgxrepmgr.DbPoolConfig{MaxConns: 2})
+	pool := pgxrepmgr.NewPool(rc, pgxrepmgr.DBPoolConfig{MaxConns: 2})
 
 	last := ""
 	for {

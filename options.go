@@ -9,16 +9,27 @@ import (
 // Options configure a Connector. Create them with NewOptions, and change them with the With methods.
 // The With methods copy the override maps, so changing a copy of Options doesn't change the others.
 type Options struct {
-	CheckOverrides map[string]string // override connection string before checking repmgr.nodes
-	AppOverrides   map[string]string // override connection string before returning Primary() or Nearest()
+	// Set in the connection strings that the connector checks the nodes
+	// with
+	CheckOverrides map[string]string
+	// Set in the connection strings that Primary, Nearest and Nodes return
+	AppOverrides map[string]string
 
-	CheckInterval  time.Duration // interval between cluster status checks
-	RetryInterval  time.Duration // interval between checks while there is no primary, and the least time between checks started by Refresh
-	ConnectTimeout time.Duration // timeout for connecting a node
-	FetchTimeout   time.Duration // timeout for fetching cluster status from a node
-	MaxLagBytes    int64         // Nearest skips the standbys that are more bytes of WAL behind the primary (0: no limit)
+	// Interval between the checks of the cluster
+	CheckInterval time.Duration
+	// Interval between the checks while there is no primary, and the
+	// least time between the checks that Refresh starts
+	RetryInterval time.Duration
+	// Timeout for connecting to a node
+	ConnectTimeout time.Duration
+	// Timeout for reading a node's state and repmgr.nodes
+	FetchTimeout time.Duration
+	// Nearest skips the standbys that are more bytes of WAL behind the
+	// primary (0: no limit)
+	MaxLagBytes int64
 
-	Logger *slog.Logger // nil means slog.Default()
+	// nil means slog.Default()
+	Logger *slog.Logger
 }
 
 // NewOptions returns the default options for a Connector that checks the nodes as repmgrUser, in the

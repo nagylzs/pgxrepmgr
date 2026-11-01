@@ -6,16 +6,16 @@ import (
 	"time"
 )
 
-// InvalidNodeId is the NodeId of a seed, which the connector only uses to discover the nodes, and of
+// InvalidNodeID is the NodeID of a seed, which the connector only uses to discover the nodes, and of
 // the NodeInfo that Primary, Nearest and the WaitFor methods return when there is no node.
-const InvalidNodeId = math.MinInt32
+const InvalidNodeID = math.MinInt32
 
-// NodeInfo represents the status of a PostgreSQL repmgr node
-//
-// it basically holds all values from repmgr.repmgr.nodes with some extensions
+// NodeInfo is a node of a repmgr cluster: its row in repmgr.nodes, and what the connector found
+// when it last checked the node.
 type NodeInfo struct {
-	NodeId         int
-	UpstreamNodeId *int
+	// The node's own row in repmgr.nodes
+	NodeID         int
+	UpstreamNodeID *int
 	Active         bool
 	NodeName       string
 	Type           string
@@ -26,20 +26,35 @@ type NodeInfo struct {
 	SlotName       string
 	ConfigFile     string
 
-	IsPrimary     bool          // the node claims to be the primary: its own row says so, and it is writable
-	Avail         bool          // the node can be used: it answered, and its own row in repmgr.nodes is active
-	InRecovery    bool          // the node is in recovery (a standby)
-	Timeline      int           // the timeline the node writes WAL on (0 when InRecovery)
-	LagBytes      int64         // bytes of WAL the node had yet to replay, compared to the primary (0 for the primary, -1 if unknown)
-	Latency       time.Duration // how long connecting took at the last check (0 if it failed)
-	FetchDuration time.Duration // the time it took to fetch the node's state and repmgr.nodes
-	LastChecked   time.Time     // time of the last check
-	LastError     error         // why the node is not available (nil when Avail)
+	// The node claims to be the primary: its own row says so, and it is
+	// writable
+	IsPrimary bool
+	// The node can be used: it answered, and its own row in repmgr.nodes
+	// is active
+	Avail bool
+	// The node is in recovery (a standby)
+	InRecovery bool
+	// The timeline the node writes WAL on (0 when InRecovery)
+	Timeline int
+	// Bytes of WAL the node had yet to replay, compared to the primary
+	// (0 for the primary, -1 if unknown)
+	LagBytes int64
+	// How long connecting took at the last check (0 if it failed)
+	Latency time.Duration
+	// The time it took to fetch the node's state and repmgr.nodes
+	FetchDuration time.Duration
+	// Time of the last check
+	LastChecked time.Time
+	// Why the node is not available (nil when Avail)
+	LastError error
 
-	lsn int64 // the WAL position in bytes (for a standby, up to where it has replayed), 0 if unknown
+	// The WAL position in bytes (for a standby, up to where it has
+	// replayed), 0 if unknown
+	lsn int64
 }
 
+// String returns the node's ID, name, location, role, availability and latency, for example to log it.
 func (n NodeInfo) String() string {
-	return fmt.Sprintf("Id=%v Name=%v Location=%v IsPrimary=%v Avail=%v Latency=%v",
-		n.NodeId, n.NodeName, n.Location, n.IsPrimary, n.Avail, n.Latency.String())
+	return fmt.Sprintf("ID=%v Name=%v Location=%v IsPrimary=%v Avail=%v Latency=%v",
+		n.NodeID, n.NodeName, n.Location, n.IsPrimary, n.Avail, n.Latency.String())
 }

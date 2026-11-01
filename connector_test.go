@@ -208,13 +208,13 @@ func TestWithoutRemoved(t *testing.T) {
 	ids := func(nodes []NodeInfo) []int {
 		var ids []int
 		for _, n := range nodes {
-			ids = append(ids, n.NodeId)
+			ids = append(ids, n.NodeID)
 		}
 		return ids
 	}
 	// Node 3 is the primary, and its repmgr.nodes no longer lists node 1.
-	nodes := []NodeInfo{{NodeId: 1}, {NodeId: 2}, {NodeId: 3}}
-	kept, primaryIdx, removed := withoutRemoved(nodes, 2, []NodeInfo{{NodeId: 2}, {NodeId: 3}})
+	nodes := []NodeInfo{{NodeID: 1}, {NodeID: 2}, {NodeID: 3}}
+	kept, primaryIdx, removed := withoutRemoved(nodes, 2, []NodeInfo{{NodeID: 2}, {NodeID: 3}})
 	if !slices.Equal(ids(kept), []int{2, 3}) || primaryIdx != 1 || !slices.Equal(ids(removed), []int{1}) {
 		t.Errorf("got kept=%v primaryIdx=%d removed=%v, want kept=[2 3] primaryIdx=1 removed=[1]",
 			ids(kept), primaryIdx, ids(removed))
@@ -223,11 +223,11 @@ func TestWithoutRemoved(t *testing.T) {
 
 func TestSetLag(t *testing.T) {
 	nodes := []NodeInfo{
-		{NodeId: 1, Avail: true, lsn: 1000},  // primary
-		{NodeId: 2, Avail: true, lsn: 400},   // 600 bytes behind
-		{NodeId: 3, Avail: true, lsn: 1010},  // read after the primary, so it seems to be ahead
-		{NodeId: 4, Avail: true},             // position unknown
-		{NodeId: 5, Avail: false, lsn: 1000}, // not available, for example a rogue primary
+		{NodeID: 1, Avail: true, lsn: 1000},  // primary
+		{NodeID: 2, Avail: true, lsn: 400},   // 600 bytes behind
+		{NodeID: 3, Avail: true, lsn: 1010},  // read after the primary, so it seems to be ahead
+		{NodeID: 4, Avail: true},             // position unknown
+		{NodeID: 5, Avail: false, lsn: 1000}, // not available, for example a rogue primary
 	}
 	setLag(nodes, 0)
 	var got []int64
@@ -240,7 +240,7 @@ func TestSetLag(t *testing.T) {
 	setLag(nodes, -1)
 	for _, n := range nodes {
 		if n.LagBytes != -1 {
-			t.Errorf("without a primary: node %d has LagBytes=%d, want -1", n.NodeId, n.LagBytes)
+			t.Errorf("without a primary: node %d has LagBytes=%d, want -1", n.NodeID, n.LagBytes)
 		}
 	}
 }
@@ -248,11 +248,11 @@ func TestSetLag(t *testing.T) {
 func TestSelectNearest(t *testing.T) {
 	const mb = 1 << 20
 	nodes := []NodeInfo{
-		{NodeId: 1, Avail: true, Latency: 30 * time.Millisecond, LagBytes: 0},       // primary
-		{NodeId: 2, Avail: true, Latency: 10 * time.Millisecond, LagBytes: 5 * mb},  // closest, far behind
-		{NodeId: 3, Avail: true, Latency: 20 * time.Millisecond, LagBytes: 100_000}, // a bit behind
-		{NodeId: 4, Avail: true, Latency: 15 * time.Millisecond, LagBytes: -1},      // lag unknown
-		{NodeId: 5, Avail: false, Latency: time.Millisecond},
+		{NodeID: 1, Avail: true, Latency: 30 * time.Millisecond, LagBytes: 0},       // primary
+		{NodeID: 2, Avail: true, Latency: 10 * time.Millisecond, LagBytes: 5 * mb},  // closest, far behind
+		{NodeID: 3, Avail: true, Latency: 20 * time.Millisecond, LagBytes: 100_000}, // a bit behind
+		{NodeID: 4, Avail: true, Latency: 15 * time.Millisecond, LagBytes: -1},      // lag unknown
+		{NodeID: 5, Avail: false, Latency: time.Millisecond},
 	}
 	for _, tc := range []struct {
 		name        string
@@ -265,7 +265,7 @@ func TestSelectNearest(t *testing.T) {
 		{"only the primary is within the limit", 0, 1000, 1},
 		{"no primary, so the lag is unknown", -1, mb, 2},
 	} {
-		if idx := selectNearest(nodes, tc.primaryIdx, tc.maxLagBytes); idx < 0 || nodes[idx].NodeId != tc.want {
+		if idx := selectNearest(nodes, tc.primaryIdx, tc.maxLagBytes); idx < 0 || nodes[idx].NodeID != tc.want {
 			t.Errorf("%s: got index %d, want node %d", tc.name, idx, tc.want)
 		}
 	}
@@ -280,11 +280,11 @@ func TestNoNode(t *testing.T) {
 	if err := c.Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if n := c.Primary(); n.Avail || n.NodeId != InvalidNodeId || !errors.Is(n.LastError, ErrNoPrimary) {
-		t.Errorf("Primary: NodeId=%v Avail=%v LastError=%v, want ErrNoPrimary", n.NodeId, n.Avail, n.LastError)
+	if n := c.Primary(); n.Avail || n.NodeID != InvalidNodeID || !errors.Is(n.LastError, ErrNoPrimary) {
+		t.Errorf("Primary: NodeID=%v Avail=%v LastError=%v, want ErrNoPrimary", n.NodeID, n.Avail, n.LastError)
 	}
-	if n := c.Nearest(); n.Avail || n.NodeId != InvalidNodeId || !errors.Is(n.LastError, ErrNoNode) {
-		t.Errorf("Nearest: NodeId=%v Avail=%v LastError=%v, want ErrNoNode", n.NodeId, n.Avail, n.LastError)
+	if n := c.Nearest(); n.Avail || n.NodeID != InvalidNodeID || !errors.Is(n.LastError, ErrNoNode) {
+		t.Errorf("Nearest: NodeID=%v Avail=%v LastError=%v, want ErrNoNode", n.NodeID, n.Avail, n.LastError)
 	}
 	nodes := c.Nodes()
 	if len(nodes) != 1 {

@@ -9,31 +9,39 @@ import (
 	"time"
 )
 
-// DbPoolConfig default pool config see https://pkg.go.dev/github.com/jackc/pgx/v5/pgxpool#Config
+// DBPoolConfig holds the settings of the pgxpool.Pool that a Pool creates for each node. The fields
+// are the same as in pgxpool.Config.
 //
 // Fields that are zero (or negative) keep pgxpool's value: its default, or the one given in the
 // connection string (pool_max_conns, pool_min_conns, pool_max_conn_lifetime, ...). The zero value is
 // a valid config.
-type DbPoolConfig struct {
-	// MaxConnLifetime is the duration since creation after which a connection will be automatically closed.
+type DBPoolConfig struct {
+	// MaxConnLifetime is the duration since creation after which a
+	// connection will be automatically closed.
 	MaxConnLifetime time.Duration
 
-	// MaxConnLifetimeJitter is the duration after MaxConnLifetime to randomly decide to close a connection.
-	// This helps prevent all connections from being closed at the exact same time, starving the pool.
+	// MaxConnLifetimeJitter is the duration after MaxConnLifetime to
+	// randomly decide to close a connection. This helps prevent all
+	// connections from being closed at the exact same time, starving the
+	// pool.
 	MaxConnLifetimeJitter time.Duration
 
-	// MaxConnIdleTime is the duration after which an idle connection will be automatically closed by the health check.
+	// MaxConnIdleTime is the duration after which an idle connection will
+	// be automatically closed by the health check.
 	MaxConnIdleTime time.Duration
 
-	// MaxConns is the maximum size of the pool. The default is the greater of 4 or runtime.NumCPU().
+	// MaxConns is the maximum size of the pool. The default is the greater
+	// of 4 or runtime.NumCPU().
 	MaxConns int32
 
-	// MinConns is the minimum size of the pool. After connection closes, the pool might dip below MinConns. A low
-	// number of MinConns might mean the pool is empty after MaxConnLifetime until the health check has a chance
-	// to create new connections.
+	// MinConns is the minimum size of the pool. After connection closes,
+	// the pool might dip below MinConns. A low number of MinConns might
+	// mean the pool is empty after MaxConnLifetime until the health check
+	// has a chance to create new connections.
 	MinConns int32
 
-	// HealthCheckPeriod is the duration between checks of the health of idle connections.
+	// HealthCheckPeriod is the duration between checks of the health of
+	// idle connections.
 	HealthCheckPeriod time.Duration
 }
 
@@ -42,7 +50,7 @@ type DbPoolConfig struct {
 // Zero is never useful for pgxpool here: MaxConns must be at least 1, HealthCheckPeriod 0 panics,
 // MaxConnLifetime or MaxConnIdleTime 0 closes connections at every health check, and for MinConns
 // and MaxConnLifetimeJitter zero is pgxpool's default anyway.
-func (c DbPoolConfig) ApplyTo(cfg *pgxpool.Config) {
+func (c DBPoolConfig) ApplyTo(cfg *pgxpool.Config) {
 	if c.MinConns > 0 {
 		cfg.MinConns = c.MinConns
 	}
@@ -68,20 +76,20 @@ func (c DbPoolConfig) ApplyTo(cfg *pgxpool.Config) {
 type Pool struct {
 	c        *Connector
 	mu       sync.Mutex
-	cfg      DbPoolConfig
+	cfg      DBPoolConfig
 	pools    map[int]nodePool
 	removals int // the connector's removal count when the pools were last compared with its nodes
 	closed   bool
 }
 
-// nodePool is the pool of a node, with the connection string it was created with
+// nodePool is the pool of a node, with the connection string it was created with.
 type nodePool struct {
 	connInfo string
 	pool     *pgxpool.Pool
 }
 
 // NewPool returns a Pool that creates the pools of the nodes with cfg, when they are first used.
-func NewPool(connector *Connector, cfg DbPoolConfig) *Pool {
+func NewPool(connector *Connector, cfg DBPoolConfig) *Pool {
 	return &Pool{c: connector, mu: sync.Mutex{}, cfg: cfg, pools: make(map[int]nodePool)}
 }
 
@@ -107,17 +115,17 @@ func (p *Pool) NearestNode() NodeInfo {
 	return p.c.Nearest()
 }
 
-// NearestPool returns a cached pool for the (current) nearest node
+// NearestPool returns the cached pool of the current nearest node (see GetPool).
 func (p *Pool) NearestPool() (*pgxpool.Pool, error) {
 	return p.GetPool(p.c.Nearest())
 }
 
-// PrimaryPool returns a cached pool for the (current) primary node
+// PrimaryPool returns the cached pool of the current primary node (see GetPool).
 func (p *Pool) PrimaryPool() (*pgxpool.Pool, error) {
 	return p.GetPool(p.c.Primary())
 }
 
-// GetPool returns a cached pool for the given node, which should come from the connector.
+// GetPool returns the cached pool of a node, which should come from the connector.
 //
 // If the node is not available, it returns the node's LastError, for example ErrNoPrimary for
 // PrimaryPool during a failover. If the node's connection string has changed in repmgr.nodes, then
@@ -128,7 +136,7 @@ func (p *Pool) GetPool(nodeInfo NodeInfo) (*pgxpool.Pool, error) {
 		if nodeInfo.LastError != nil {
 			return nil, nodeInfo.LastError
 		}
-		return nil, fmt.Errorf("pgxrepmgr: node %v is not available", nodeInfo.NodeId)
+		return nil, fmt.Errorf("pgxrepmgr: node %v is not available", nodeInfo.NodeID)
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -144,7 +152,7 @@ func (p *Pool) GetPool(nodeInfo NodeInfo) (*pgxpool.Pool, error) {
 			}
 		}
 	}
-	np, ok := p.pools[nodeInfo.NodeId]
+	np, ok := p.pools[nodeInfo.NodeID]
 	if ok && np.connInfo != nodeInfo.ConnInfo {
 		go np.pool.Close()
 		ok = false
@@ -160,7 +168,7 @@ func (p *Pool) GetPool(nodeInfo NodeInfo) (*pgxpool.Pool, error) {
 			return nil, err
 		}
 		np = nodePool{connInfo: nodeInfo.ConnInfo, pool: pool}
-		p.pools[nodeInfo.NodeId] = np
+		p.pools[nodeInfo.NodeID] = np
 	}
 	return np.pool, nil
 }
@@ -173,7 +181,7 @@ func (p *Pool) refreshAfter(ctx context.Context, err error) {
 	}
 }
 
-// ConnectPrimary returns a connection to the primary database, the caller **must** call Release() on it
+// ConnectPrimary returns a connection to the primary. The caller must call Release on it.
 //
 // If connecting fails because of the node, or because there is no primary (see IsNodeError), then it
 // refreshes the connector before returning the error, so that a retry goes to the new primary.
@@ -181,7 +189,7 @@ func (p *Pool) ConnectPrimary(ctx context.Context) (*pgxpool.Conn, error) {
 	return p.acquire(ctx, p.c.Primary())
 }
 
-// ConnectNearest returns a connection to the nearest database, the caller **must** call Release() on it
+// ConnectNearest returns a connection to the nearest node. The caller must call Release on it.
 //
 // If connecting fails because of the node, or because no node is available (see IsNodeError), then it
 // refreshes the connector before returning the error, so that a retry goes to another node.

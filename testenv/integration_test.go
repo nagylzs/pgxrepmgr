@@ -65,7 +65,7 @@ func TestWritesFollowFailoverQuickly(t *testing.T) {
 	cluster(t, "up")
 	old := currentPrimary(t)
 	rc := newConnector(t, testOptions(t, 30*time.Second))
-	pool := pgxrepmgr.NewPool(rc, pgxrepmgr.DbPoolConfig{})
+	pool := pgxrepmgr.NewPool(rc, pgxrepmgr.DBPoolConfig{})
 	t.Cleanup(pool.Close)
 	waitForPrimary(t, rc, old.name)
 

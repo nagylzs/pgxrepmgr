@@ -9,9 +9,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// settings returns the fields of cfg that DbPoolConfig can set.
-func settings(cfg *pgxpool.Config) DbPoolConfig {
-	return DbPoolConfig{
+// settings returns the fields of cfg that DBPoolConfig can set.
+func settings(cfg *pgxpool.Config) DBPoolConfig {
+	return DBPoolConfig{
 		MaxConnLifetime:       cfg.MaxConnLifetime,
 		MaxConnLifetimeJitter: cfg.MaxConnLifetimeJitter,
 		MaxConnIdleTime:       cfg.MaxConnIdleTime,
@@ -23,18 +23,18 @@ func settings(cfg *pgxpool.Config) DbPoolConfig {
 
 // node returns an available NodeInfo. GetPool doesn't connect, so nothing needs to listen on port.
 func node(id int, port string) NodeInfo {
-	return NodeInfo{NodeId: id, Avail: true, ConnInfo: "host=127.0.0.1 port=" + port}
+	return NodeInfo{NodeID: id, Avail: true, ConnInfo: "host=127.0.0.1 port=" + port}
 }
 
 // newTestPool returns a pool that is closed when the test ends.
-func newTestPool(t *testing.T, c *Connector, cfg DbPoolConfig) *Pool {
+func newTestPool(t *testing.T, c *Connector, cfg DBPoolConfig) *Pool {
 	p := NewPool(c, cfg)
 	t.Cleanup(p.Close)
 	return p
 }
 
-// The zero fields of DbPoolConfig keep pgxpool's defaults.
-func TestDbPoolConfigKeepsDefaults(t *testing.T) {
+// The zero fields of DBPoolConfig keep pgxpool's defaults.
+func TestDBPoolConfigKeepsDefaults(t *testing.T) {
 	defaults, err := pgxpool.ParseConfig(node(1, "1").ConnInfo)
 	if err != nil {
 		t.Fatal(err)
@@ -46,11 +46,11 @@ func TestDbPoolConfigKeepsDefaults(t *testing.T) {
 	c := newTestConnector(t, quietOptions(), closedPort)
 	for _, tc := range []struct {
 		name string
-		cfg  DbPoolConfig
-		want DbPoolConfig
+		cfg  DBPoolConfig
+		want DBPoolConfig
 	}{
-		{"empty", DbPoolConfig{}, settings(defaults)},
-		{"partial", DbPoolConfig{MaxConns: 2, HealthCheckPeriod: 5 * time.Second}, partial},
+		{"empty", DBPoolConfig{}, settings(defaults)},
+		{"partial", DBPoolConfig{MaxConns: 2, HealthCheckPeriod: 5 * time.Second}, partial},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool, err := newTestPool(t, c, tc.cfg).GetPool(node(1, "1"))
@@ -66,7 +66,7 @@ func TestDbPoolConfigKeepsDefaults(t *testing.T) {
 
 // When a node's connection string changes in repmgr.nodes, GetPool replaces its pool.
 func TestGetPoolReplacesChangedConnInfo(t *testing.T) {
-	p := newTestPool(t, newTestConnector(t, quietOptions(), closedPort), DbPoolConfig{})
+	p := newTestPool(t, newTestConnector(t, quietOptions(), closedPort), DBPoolConfig{})
 	old, err := p.GetPool(node(1, "1"))
 	if err != nil {
 		t.Fatal(err)
@@ -87,15 +87,15 @@ func TestGetPoolReplacesChangedConnInfo(t *testing.T) {
 func TestGetPoolClosesPoolsOfRemovedNodes(t *testing.T) {
 	c := NewConnector(quietOptions(), closedPort)
 	c.Close() // so that no check changes nodes below
-	c.nodes = []NodeInfo{{NodeId: 1}, {NodeId: 2}}
-	p := newTestPool(t, c, DbPoolConfig{})
+	c.nodes = []NodeInfo{{NodeID: 1}, {NodeID: 2}}
+	p := newTestPool(t, c, DBPoolConfig{})
 	for _, n := range []NodeInfo{node(1, "1"), node(2, "2")} {
 		if _, err := p.GetPool(n); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// A check removed node 2
-	c.nodes = []NodeInfo{{NodeId: 1}}
+	c.nodes = []NodeInfo{{NodeID: 1}}
 	c.removals++
 	if _, err := p.GetPool(node(1, "1")); err != nil {
 		t.Fatal(err)
@@ -109,7 +109,7 @@ func TestGetPoolClosesPoolsOfRemovedNodes(t *testing.T) {
 }
 
 func TestPoolClose(t *testing.T) {
-	p := NewPool(newTestConnector(t, quietOptions(), closedPort), DbPoolConfig{})
+	p := NewPool(newTestConnector(t, quietOptions(), closedPort), DBPoolConfig{})
 	if _, err := p.GetPool(node(1, "1")); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestPoolClose(t *testing.T) {
 // loop doesn't spin.
 func TestConnectPrimaryWithoutPrimary(t *testing.T) {
 	c := newTestConnector(t, quietOptions().WithRetryInterval(100*time.Millisecond), closedPort)
-	p := newTestPool(t, c, DbPoolConfig{})
+	p := newTestPool(t, c, DBPoolConfig{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, before := c.checkCounts()

@@ -87,7 +87,7 @@ func main() {
 	}
 	fmt.Println("primary:", primary.NodeName)
 
-	pool := pgxrepmgr.NewPool(rc, pgxrepmgr.DbPoolConfig{MaxConns: 10})
+	pool := pgxrepmgr.NewPool(rc, pgxrepmgr.DBPoolConfig{MaxConns: 10})
 	defer pool.Close()
 
 	// Writes go to the primary
@@ -151,7 +151,7 @@ All methods are safe for concurrent use.
 ### Pool
 
 `NewPool(connector, cfg)` returns a `Pool`, which keeps a `pgxpool.Pool` for each node, and creates it with the
-positive fields of `cfg` (`DbPoolConfig`) when the node is first used. The other settings keep pgxpool's
+positive fields of `cfg` (`DBPoolConfig`) when the node is first used. The other settings keep pgxpool's
 defaults, or the `pool_*` settings of the connection string. When a node's conninfo changes in `repmgr.nodes`,
 its pool is replaced, and when a node is removed from the cluster, its pool is closed.
 
@@ -194,8 +194,8 @@ without the refresh.
 ```go
 type NodeInfo struct {
 	// The node's own row in repmgr.nodes
-	NodeId         int
-	UpstreamNodeId *int
+	NodeID         int
+	UpstreamNodeID *int
 	Active         bool
 	NodeName       string
 	Type           string
@@ -230,21 +230,21 @@ type NodeInfo struct {
 }
 ```
 
-`NodeId` is `InvalidNodeId` in the `NodeInfo` that `Primary()`, `Nearest()` and the `WaitFor` methods return when
-there is no node.
+`NodeID` is `InvalidNodeID` in the `NodeInfo` that `Primary()`, `Nearest()` and the `WaitFor` methods return
+when there is no node.
 
 ## Connection strings
 
-Only key=value connection strings are supported, not `postgres://` URLs. Values can be quoted with single quotes,
-and a backslash escapes a quote or a backslash, for example `password='it\'s secret'`.
+Only key=value connection strings (DSNs) are supported, not `postgres://` URLs. Values can be quoted with single
+quotes, and a backslash escapes a quote or a backslash, for example `password='it\'s secret'`.
 
 `ConnInfo` holds the node's conninfo from `repmgr.nodes`, with the app overrides applied. It is normalized: its
 keys are sorted, and its values are quoted where needed, so the same settings always give the same string. You
 can pass it to `pgx.Connect` or `pgxpool.New` yourself if you don't use `Pool`.
 
-The package also has helpers for connection strings: `ParseConnString`, `BuildConnString`, `ReplaceInDsn`,
-`DsnWithHostPort`, `DsnWithDatabase` and `RemoveSensitiveFromDsn`. The last one removes the user and the password,
-for example to log a connection string.
+The package also has helpers for connection strings: `ParseDSN`, `BuildDSN`, `ReplaceInDSN`, `DSNWithHostPort`,
+`DSNWithDatabase` and `RemoveSensitiveFromDSN`. The last one removes the user and the password, for example to
+log a connection string.
 
 ## Caveats
 

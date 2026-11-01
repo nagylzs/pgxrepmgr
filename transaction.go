@@ -8,9 +8,9 @@ import (
 	"log/slog"
 )
 
-// InTransaction acquires a connection from pool, and calls `proc` within a transaction on it.
-// If `proc` returns an error, then it rolls back the transaction, otherwise commits.
-// It returns the error returned by `proc`, or the error of the commit, or an error of its own.
+// InTransaction acquires a connection from pool, and calls proc in a transaction on it. If proc
+// returns nil, it commits the transaction, otherwise it rolls it back. It returns the error of proc,
+// the error of the commit, or an error of its own.
 func InTransaction(ctx context.Context, pool *pgxpool.Pool, proc func(*pgxpool.Conn, pgx.Tx) error) error {
 	// Connect to primary db
 	conn, err := pool.Acquire(ctx)
