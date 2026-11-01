@@ -34,3 +34,5 @@ jobs:
         run: |
           testenv/cluster.sh show || true
           docker compose -f testenv/compose.yaml logs --no-color --timestamps
+          testenv/plain.sh show || true
+          docker compose -f testenv/plain.yaml logs --no-color --timestamps

@@ -1,0 +1,56 @@
+# Three-node PostgreSQL cluster without repmgr, for testing pgxrepmgr with a NodeSource. Use plain.sh
+# rather than docker compose directly.
+#
+# plain1 is the primary, and plain2 and plain3 stream from it. Nothing promotes a standby by itself:
+# the tests do that with pg_promote(). It uses the image of the repmgr cluster, with its own
+# entrypoint, on another subnet, so both clusters can run at the same time.
+name: pgxrepmgr-plain
+
+x-node: &node
+  build: .
+  image: pgxrepmgr-testnode:17
+  init: true
+  entrypoint: [/usr/local/bin/plain-entrypoint.sh]
+  volumes:
+    - ./plain-entrypoint.sh:/usr/local/bin/plain-entrypoint.sh:ro
+  stop_grace_period: 20s
+
+services:
+  plain1:
+    <<: *node
+    hostname: plain1
+    networks:
+      plain:
+        ipv4_address: 172.28.1.11
+    environment:
+      NODE_NAME: plain1
+      PRIMARY_HOST: 172.28.1.11
+      NODE_HOST: 172.28.1.11
+
+  plain2:
+    <<: *node
+    hostname: plain2
+    networks:
+      plain:
+        ipv4_address: 172.28.1.12
+    environment:
+      NODE_NAME: plain2
+      PRIMARY_HOST: 172.28.1.11
+      NODE_HOST: 172.28.1.12
+
+  plain3:
+    <<: *node
+    hostname: plain3
+    networks:
+      plain:
+        ipv4_address: 172.28.1.13
+    environment:
+      NODE_NAME: plain3
+      PRIMARY_HOST: 172.28.1.11
+      NODE_HOST: 172.28.1.13
+
+networks:
+  plain:
+    ipam:
+      config:
+        - subnet: 172.28.1.0/24

@@ -22,7 +22,8 @@ type Options struct {
 	RetryInterval time.Duration
 	// Timeout for connecting to a node
 	ConnectTimeout time.Duration
-	// Timeout for reading a node's state and repmgr.nodes
+	// Timeout for reading a node's state and repmgr.nodes, and for getting
+	// the node list from a NodeSource
 	FetchTimeout time.Duration
 	// Nearest skips the standbys that are more bytes of WAL behind the
 	// primary (0: no limit)
@@ -33,7 +34,8 @@ type Options struct {
 }
 
 // NewOptions returns the default options for a Connector that checks the nodes as repmgrUser, in the
-// repmgr database. The user only needs to read repmgr.nodes.
+// repmgr database. The user only needs to read repmgr.nodes. With a NodeSource, any user will do, and
+// the repmgr database is not needed (see NewConnectorWithSource).
 func NewOptions(repmgrUser string, repmgrPassword string) Options {
 	co := make(map[string]string)
 	co["user"] = repmgrUser
@@ -68,6 +70,15 @@ func (o Options) WithCheckOverride(key string, value string) Options {
 	return o
 }
 
+// WithoutCheckOverride removes key from the check overrides, so that the value in each node's
+// connection string applies. For example, WithoutCheckOverride("dbname") makes a Connector with a
+// NodeSource check the nodes in the database of their connection strings, rather than in repmgr.
+func (o Options) WithoutCheckOverride(key string) Options {
+	o.CheckOverrides = maps.Clone(o.CheckOverrides)
+	delete(o.CheckOverrides, key)
+	return o
+}
+
 // WithAppOverride sets key to value in the connection strings of the nodes that Primary, Nearest and
 // Nodes return, and so also in the ones that Pool connects with.
 func (o Options) WithAppOverride(key string, value string) Options {
@@ -81,7 +92,8 @@ func (o Options) WithConnectTimeout(t time.Duration) Options {
 	return o
 }
 
-// WithFetchTimeout sets the timeout for reading a node's state and repmgr.nodes. It must be at least 100 ms.
+// WithFetchTimeout sets the timeout for reading a node's state and repmgr.nodes, and for getting the
+// node list from a NodeSource. It must be at least 100 ms.
 func (o Options) WithFetchTimeout(t time.Duration) Options {
 	o.FetchTimeout = t
 	return o

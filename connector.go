@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/teivah/broadcast"
 	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -21,6 +22,8 @@ type Connector struct {
 	relay               *broadcast.Relay[struct{}]
 	initial             []NodeInfo
 	initialScanComplete bool
+	source              NodeSource // nil: discover the nodes from repmgr.nodes
+	listed              []Node     // the last list that source returned, used only by run
 
 	options    Options
 	nodes      []NodeInfo // the nodes found by the last check
@@ -43,6 +46,44 @@ type Connector struct {
 // It panics if the options are invalid (see the With methods of Options), if connStrings is empty, or
 // if one of them is not a valid key=value connection string.
 func NewConnector(opt Options, connStrings ...string) *Connector {
+	validate(opt)
+	if len(connStrings) == 0 {
+		panic("at least one connStrings is required")
+	}
+	initial := make([]NodeInfo, 0)
+	for _, d := range connStrings {
+		if _, err := ParseDSN(d); err != nil {
+			panic(fmt.Sprintf("invalid seed: %v", err))
+		}
+		initial = append(initial, NodeInfo{NodeID: InvalidNodeID, ConnInfo: d})
+	}
+	return start(opt, initial, nil)
+}
+
+// NewConnectorWithSource monitors the nodes that src lists, rather than the ones in repmgr.nodes.
+// The nodes don't need repmgr: a node is available if the connector can connect to it and read its
+// state, and the primary is the node that is not in recovery. If more than one node is not in
+// recovery, the one on the highest timeline is the primary, like with repmgr.nodes.
+//
+// The connector checks the nodes in the database of the check overrides, which is repmgr after
+// NewOptions. Use Options.WithoutCheckOverride("dbname") to check them in the database of their
+// connection strings instead, or WithCheckOverride to set another one.
+//
+// The connector gets the list from src at the start of every check. After the list changes, call
+// Refresh to use the new list without waiting for the next check. A node that is no longer listed is
+// removed right away, and Pool closes its pool.
+//
+// It panics if the options are invalid (see the With methods of Options), or if src is nil.
+func NewConnectorWithSource(opt Options, src NodeSource) *Connector {
+	validate(opt)
+	if src == nil {
+		panic("src must not be nil")
+	}
+	return start(opt, nil, src)
+}
+
+// validate panics if opt is invalid.
+func validate(opt Options) {
 	if opt.CheckInterval < time.Duration(1)*time.Second {
 		panic("CheckInterval should be at least one second")
 	}
@@ -55,16 +96,11 @@ func NewConnector(opt Options, connStrings ...string) *Connector {
 	if opt.RetryInterval < time.Duration(100)*time.Millisecond || opt.RetryInterval > opt.CheckInterval {
 		panic("RetryInterval should be at least 100 msec, and at most CheckInterval")
 	}
-	if len(connStrings) == 0 {
-		panic("at least one connStrings is required")
-	}
-	initial := make([]NodeInfo, 0)
-	for _, d := range connStrings {
-		if _, err := ParseDSN(d); err != nil {
-			panic(fmt.Sprintf("invalid seed: %v", err))
-		}
-		initial = append(initial, NodeInfo{NodeID: InvalidNodeID, ConnInfo: d})
-	}
+}
+
+// start returns a connector that checks the seeds in initial, or the nodes that src lists, in the
+// background.
+func start(opt Options, initial []NodeInfo, src NodeSource) *Connector {
 	// The caller may change the maps later
 	opt.CheckOverrides = maps.Clone(opt.CheckOverrides)
 	opt.AppOverrides = maps.Clone(opt.AppOverrides)
@@ -73,6 +109,7 @@ func NewConnector(opt Options, connStrings ...string) *Connector {
 		relay:               broadcast.NewRelay[struct{}](),
 		initial:             initial,
 		initialScanComplete: false,
+		source:              src,
 
 		options:    opt,
 		nodes:      make([]NodeInfo, 0),
@@ -275,58 +312,23 @@ func (c *Connector) checkNode(ctx context.Context, nodeID int, dsn string) (res 
 		NodeID: nodeID, ConnInfo: dsn, IsPrimary: false, Avail: false,
 		LastChecked: started, LastError: nil}
 	res.nodes = make([]NodeInfo, 0)
-	ctx2, cancel := context.WithTimeout(ctx, c.options.ConnectTimeout)
-	defer cancel()
-	// Try to connect to the node
-	dsn2, err := ReplaceInDSN(dsn, c.options.CheckOverrides)
+	conn, latency, err := c.connect(ctx, dsn)
 	if err != nil {
 		res.Connected.LastError = err
 		c.logCheckError(ctx, err.Error())
 		return res
 	}
-	conn, err := pgx.Connect(ctx2, dsn2)
-	if err != nil {
-		res.Connected.LastError = err
-		c.logCheckError(ctx, err.Error())
-		return res
-	}
-	res.Connected.Latency = time.Since(started)
+	res.Connected.Latency = latency
+	defer c.closeConn(ctx, conn)
 
-	defer func() {
-		err := conn.Close(ctx)
-		if err != nil {
-			c.logCheckError(ctx, "could not close connection")
-		}
-	}()
 	started = time.Now()
 	ctx3, cancel := context.WithTimeout(ctx, c.options.FetchTimeout)
 	defer cancel()
-	// Only a node that is not in recovery can be the primary. If more than one node claims to be
-	// the primary, the timeline tells which one was promoted last (see selectPrimary). The WAL
-	// position (for a standby, up to where it has replayed) tells how far behind the primary it is.
-	var inRecovery bool
-	var walFile *string
-	var lsn *int64
-	err = conn.QueryRow(
-		ctx3,
-		"select pg_is_in_recovery(), "+
-			"case when pg_is_in_recovery() then null else pg_walfile_name(pg_current_wal_lsn()) end, "+
-			"pg_wal_lsn_diff(case when pg_is_in_recovery() then pg_last_wal_replay_lsn() "+
-			"else pg_current_wal_lsn() end, '0/0')::bigint",
-	).Scan(&inRecovery, &walFile, &lsn)
+	state, err := queryState(ctx3, conn)
 	if err != nil {
 		res.Connected.LastError = err
 		c.logCheckError(ctx, err.Error())
 		return res
-	}
-	var timeline uint32
-	if walFile != nil {
-		// A WAL file name starts with its timeline ID as 8 hex digits.
-		if _, err = fmt.Sscanf(*walFile, "%8x", &timeline); err != nil {
-			res.Connected.LastError = fmt.Errorf("cannot parse WAL file name %q: %w", *walFile, err)
-			c.logCheckError(ctx, res.Connected.LastError.Error())
-			return res
-		}
 	}
 	// Read all nodes before using any of them, so that a node is not available with a partial list
 	rows, err := conn.Query(
@@ -358,13 +360,11 @@ func (c *Connector) checkNode(ctx context.Context, nodeID int, dsn string) (res 
 		if node.NodeID == res.Connected.NodeID && node.Active {
 			node.Avail = true
 			node.Latency = res.Connected.Latency
-			node.InRecovery = inRecovery
-			node.Timeline = int(timeline)
-			if lsn != nil {
-				node.lsn = *lsn
-			}
+			node.InRecovery = state.inRecovery
+			node.Timeline = state.timeline
+			node.lsn = state.lsn
 			// A former primary that repmgr is turning into a standby keeps type=primary for a while.
-			node.IsPrimary = node.IsPrimary && !inRecovery
+			node.IsPrimary = node.IsPrimary && !state.inRecovery
 			res.Connected = node
 		}
 		// After a failover, the old primary's row stays type=primary with active=false.
@@ -386,6 +386,109 @@ func (c *Connector) checkNode(ctx context.Context, nodeID int, dsn string) (res 
 	}
 	res.Connected.FetchDuration = time.Since(started)
 	return res
+}
+
+// connect connects to the node at dsn with the check overrides applied, and returns how long it took.
+func (c *Connector) connect(ctx context.Context, dsn string) (*pgx.Conn, time.Duration, error) {
+	started := time.Now()
+	dsn2, err := ReplaceInDSN(dsn, c.options.CheckOverrides)
+	if err != nil {
+		return nil, 0, err
+	}
+	ctx2, cancel := context.WithTimeout(ctx, c.options.ConnectTimeout)
+	defer cancel()
+	conn, err := pgx.Connect(ctx2, dsn2)
+	if err != nil {
+		return nil, 0, err
+	}
+	return conn, time.Since(started), nil
+}
+
+// closeConn closes a connection that a check opened.
+func (c *Connector) closeConn(ctx context.Context, conn *pgx.Conn) {
+	if err := conn.Close(ctx); err != nil {
+		c.logCheckError(ctx, "could not close connection")
+	}
+}
+
+// nodeState is what a node says about itself.
+type nodeState struct {
+	inRecovery bool
+	timeline   int   // the timeline the node writes WAL on, 0 in recovery
+	lsn        int64 // the WAL position in bytes (for a standby, up to where it has replayed), 0 if unknown
+}
+
+// queryState reads the state of the node on conn.
+func queryState(ctx context.Context, conn *pgx.Conn) (nodeState, error) {
+	// Only a node that is not in recovery can be the primary. If more than one node claims to be
+	// the primary, the timeline tells which one was promoted last (see selectPrimary). The WAL
+	// position (for a standby, up to where it has replayed) tells how far behind the primary it is.
+	var inRecovery bool
+	var walFile *string
+	var lsn *int64
+	err := conn.QueryRow(
+		ctx,
+		"select pg_is_in_recovery(), "+
+			"case when pg_is_in_recovery() then null else pg_walfile_name(pg_current_wal_lsn()) end, "+
+			"pg_wal_lsn_diff(case when pg_is_in_recovery() then pg_last_wal_replay_lsn() "+
+			"else pg_current_wal_lsn() end, '0/0')::bigint",
+	).Scan(&inRecovery, &walFile, &lsn)
+	if err != nil {
+		return nodeState{}, err
+	}
+	state := nodeState{inRecovery: inRecovery}
+	if walFile != nil {
+		// A WAL file name starts with its timeline ID as 8 hex digits.
+		var timeline uint32
+		if _, err = fmt.Sscanf(*walFile, "%8x", &timeline); err != nil {
+			return nodeState{}, fmt.Errorf("cannot parse WAL file name %q: %w", *walFile, err)
+		}
+		state.timeline = int(timeline)
+	}
+	if lsn != nil {
+		state.lsn = *lsn
+	}
+	return state, nil
+}
+
+// checkListedNode checks a node that the source listed. The node is available if the connector can
+// connect to it and read its state, and it is the primary if it is not in recovery.
+func (c *Connector) checkListedNode(ctx context.Context, n NodeInfo) NodeInfo {
+	n.LastChecked = time.Now()
+	conn, latency, err := c.connect(ctx, n.ConnInfo)
+	if err != nil {
+		n.LastError = err
+		c.logCheckError(ctx, err.Error())
+		return n
+	}
+	n.Latency = latency
+	defer c.closeConn(ctx, conn)
+
+	started := time.Now()
+	ctx3, cancel := context.WithTimeout(ctx, c.options.FetchTimeout)
+	defer cancel()
+	state, err := queryState(ctx3, conn)
+	if err != nil {
+		n.LastError = err
+		c.logCheckError(ctx, err.Error())
+		return n
+	}
+	n.FetchDuration = time.Since(started)
+	n.InRecovery, n.Timeline, n.lsn = state.inRecovery, state.timeline, state.lsn
+	n.IsPrimary = !state.inRecovery
+	n.Avail = true
+	return n
+}
+
+// checkListedNodes checks nodes in parallel, and returns the results in the same order.
+func (c *Connector) checkListedNodes(ctx context.Context, nodes []NodeInfo) []NodeInfo {
+	results := make([]NodeInfo, len(nodes))
+	var wg sync.WaitGroup
+	for i, n := range nodes {
+		wg.Go(func() { results[i] = c.checkListedNode(ctx, n) })
+	}
+	wg.Wait()
+	return results
 }
 
 func (c *Connector) collectInfos(ctx context.Context, src []NodeInfo) []checkNodeResult {
@@ -561,8 +664,10 @@ func (c *Connector) wait(started time.Time) bool {
 	}
 }
 
-// check checks all known nodes once, and stores the results. It returns false if Close canceled it.
-func (c *Connector) check() bool {
+// checkRepmgr checks the seeds or the known nodes, and the nodes that their repmgr.nodes lists. It
+// returns the results, the index of the primary in them, and the nodes that the primary's repmgr.nodes
+// no longer lists. ok is false if Close canceled the check.
+func (c *Connector) checkRepmgr() (nodeInfos []NodeInfo, primaryIdx int, removed []NodeInfo, ok bool) {
 	ctx := c.ctx
 	// Get connection config
 	c.mu.Lock()
@@ -609,22 +714,81 @@ func (c *Connector) check() bool {
 		}
 	}
 	if ctx.Err() != nil {
-		// Close canceled the check, so the results are not real
-		return false
+		return nil, -1, nil, false
 	}
-	nodeInfos := make([]NodeInfo, 0, len(results))
+	nodeInfos = make([]NodeInfo, 0, len(results))
 	for _, result := range results {
 		nodeInfos = append(nodeInfos, result.Connected)
 	}
 	// Select the primary first, because it marks the nodes that lost to it unavailable
-	primaryIdx := c.selectPrimary(nodeInfos)
-	var removed []NodeInfo
+	primaryIdx = c.selectPrimary(nodeInfos)
 	if primaryIdx >= 0 {
 		// nodeInfos[i] is results[i].Connected
 		nodeInfos, primaryIdx, removed = withoutRemoved(nodeInfos, primaryIdx, results[primaryIdx].nodes)
-		for _, n := range removed {
-			c.Logger().Warn("Node removed from the cluster", "node", n.String())
+	}
+	return nodeInfos, primaryIdx, removed, true
+}
+
+// checkListed checks the nodes that the source lists. It returns the results, the index of the
+// primary in them, and the known nodes that are no longer listed. ok is false if Close canceled the
+// check.
+func (c *Connector) checkListed() (nodeInfos []NodeInfo, primaryIdx int, removed []NodeInfo, ok bool) {
+	ctx := c.ctx
+	list := c.sourceList(ctx)
+	listed := make(map[int]bool, len(list))
+	nodeInfos = make([]NodeInfo, 0, len(list))
+	for _, n := range list {
+		listed[n.ID] = true
+		nodeInfos = append(nodeInfos, NodeInfo{
+			NodeID: n.ID, NodeName: n.Name, Location: n.Location, ConnInfo: n.ConnInfo, Active: true})
+	}
+	c.mu.Lock()
+	for _, n := range c.nodes {
+		if !listed[n.NodeID] {
+			removed = append(removed, n)
 		}
+	}
+	c.mu.Unlock()
+	nodeInfos = c.checkListedNodes(ctx, nodeInfos)
+	if ctx.Err() != nil {
+		return nil, -1, nil, false
+	}
+	return nodeInfos, c.selectPrimary(nodeInfos), removed, true
+}
+
+// sourceList returns the node list from the source. If the source fails or returns an invalid list,
+// it logs the error, and returns the last valid list.
+func (c *Connector) sourceList(ctx context.Context) []Node {
+	ctx2, cancel := context.WithTimeout(ctx, c.options.FetchTimeout)
+	defer cancel()
+	list, err := c.source.Nodes(ctx2)
+	if err == nil {
+		err = validateNodes(list)
+	}
+	if err != nil {
+		c.logCheckError(ctx, fmt.Sprintf("cannot get the node list, using the previous one: %v", err))
+		return c.listed
+	}
+	c.listed = slices.Clone(list)
+	return c.listed
+}
+
+// check checks all known nodes once, and stores the results. It returns false if Close canceled it.
+func (c *Connector) check() bool {
+	var nodeInfos, removed []NodeInfo
+	var primaryIdx int
+	var ok bool
+	if c.source != nil {
+		nodeInfos, primaryIdx, removed, ok = c.checkListed()
+	} else {
+		nodeInfos, primaryIdx, removed, ok = c.checkRepmgr()
+	}
+	if !ok {
+		// Close canceled the check, so the results are not real
+		return false
+	}
+	for _, n := range removed {
+		c.Logger().Warn("Node removed from the cluster", "node", n.String())
 	}
 	setLag(nodeInfos, primaryIdx)
 	nearestIdx := selectNearest(nodeInfos, primaryIdx, c.options.MaxLagBytes)

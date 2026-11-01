@@ -3,14 +3,16 @@
 pgxrepmgr is a Go library that discovers and monitors a [PostgreSQL repmgr](https://www.repmgr.org/) cluster
 in the background. It tells your program which node is the current primary and which node is the nearest (the
 one with the lowest connect latency, which may be a primary or a hot standby), and it gives you
-[pgx](https://github.com/jackc/pgx) connection pools for them that follow failovers.
+[pgx](https://github.com/jackc/pgx) connection pools for them that follow failovers. The node list can also come
+from another source, such as a cluster manager, and then the cluster doesn't need repmgr (see
+[Other node sources](#other-node-sources)).
 
 ```sh
 go get github.com/nagylzs/pgxrepmgr
 ```
 
-Requirements: Go 1.25 or later, PostgreSQL 10 or later, and repmgr 4 or later. It is tested with PostgreSQL 17
-and repmgr 5.5.
+Requirements: Go 1.25 or later, PostgreSQL 10 or later, and repmgr 4 or later unless the node list comes from
+another source. It is tested with PostgreSQL 17 and repmgr 5.5.
 
 ## How it works
 
@@ -126,9 +128,10 @@ connection string.
 | `WithCheckInterval(d)`           | 30 s    | How often the cluster is checked. At least 1 s.                                           |
 | `WithRetryInterval(d)`           | 1 s     | How often it is checked while there is no primary, and the least time between checks that `Refresh` starts. Between 100 ms and `CheckInterval`. |
 | `WithConnectTimeout(d)`          | 5 s     | Timeout for connecting to a node when checking it. At least 100 ms.                       |
-| `WithFetchTimeout(d)`            | 5 s     | Timeout for reading a node's state and `repmgr.nodes`. At least 100 ms.                   |
+| `WithFetchTimeout(d)`            | 5 s     | Timeout for reading a node's state and `repmgr.nodes`, and for getting the list from a `NodeSource`. At least 100 ms. |
 | `WithMaxLagBytes(n)`             | 0       | `Nearest()` skips the standbys more than `n` bytes of WAL behind the primary. 0: no limit. |
 | `WithCheckOverride(key, value)`  |         | Sets `key` in the connection strings that the connector checks the nodes with.            |
+| `WithoutCheckOverride(key)`      |         | Removes `key` from the check overrides, so the value in each node's connection string applies. |
 | `WithAppOverride(key, value)`    |         | Sets `key` in the connection strings that `Primary()`, `Nearest()` and `Nodes()` return.  |
 | `WithLogger(l)`                  | nil     | The `*slog.Logger` to log to. nil means `slog.Default()`.                                 |
 
@@ -233,6 +236,36 @@ type NodeInfo struct {
 `NodeID` is `InvalidNodeID` in the `NodeInfo` that `Primary()`, `Nearest()` and the `WaitFor` methods return
 when there is no node.
 
+## Other node sources
+
+The node list can also come from another source than `repmgr.nodes`, such as a cluster manager. Then the nodes
+don't need repmgr at all. Implement `NodeSource`, or wrap a function in `NodeSourceFunc`, and pass it to
+`NewConnectorWithSource` instead of the seeds:
+
+```go
+src := pgxrepmgr.NodeSourceFunc(func(ctx context.Context) ([]pgxrepmgr.Node, error) {
+	return []pgxrepmgr.Node{
+		{ID: 1, Name: "db1", ConnInfo: "host=db1.example.com dbname=app", Location: "dc1"},
+		{ID: 2, Name: "db2", ConnInfo: "host=db2.example.com dbname=app", Location: "dc2"},
+	}, nil
+})
+// Check the nodes in the database of their connection strings, rather than in repmgr
+opts := pgxrepmgr.NewOptions("app", "app password").WithoutCheckOverride("dbname")
+rc := pgxrepmgr.NewConnectorWithSource(opts, src)
+```
+
+* The connector calls `Nodes` at the start of every check, with `FetchTimeout`. When you know that the list has
+  changed, call `Refresh(ctx)`, so that the connector uses the new list right away. If `Nodes` returns an error,
+  or a list with an invalid or repeated ID, the connector logs it and keeps using the last valid list.
+* A node is available if the connector can connect to it and read its state, and the primary is the node that is
+  not in recovery. If several nodes are not in recovery, the one on the highest timeline is the primary, and the
+  others are not available, as with `repmgr.nodes`. On the same timeline the lower ID wins, so give each node an
+  ID that never changes and is the same in all your processes.
+* A node that is no longer listed is removed right away, and `Pool` closes its pool.
+* In the `NodeInfo` of a listed node, `NodeID`, `NodeName`, `Location` and `ConnInfo` come from the list,
+  `Active` is true, and the other fields of the `repmgr.nodes` row are empty.
+* Checking a node needs no special privileges, so any user that can connect will do.
+
 ## Connection strings
 
 Only key=value connection strings (DSNs) are supported, not `postgres://` URLs. Values can be quoted with single
@@ -248,10 +281,11 @@ log a connection string.
 
 ## Caveats
 
-* The connector must be able to connect to the `repmgr` database (or the one in the check overrides) and read
-  `repmgr.nodes`. See [repmgr user and metadata](https://www.repmgr.org/docs/current/repmgr-user-metadata.html).
-* The connector connects to the nodes with the conninfo in `repmgr.nodes`, so your program must be able to reach
-  the nodes at those addresses. That is usually no problem inside a private network (or a docker overlay network
+* With `repmgr.nodes`, the connector must be able to connect to the `repmgr` database (or the one in the check
+  overrides) and read `repmgr.nodes`. See
+  [repmgr user and metadata](https://www.repmgr.org/docs/current/repmgr-user-metadata.html).
+* The connector connects to the nodes with the conninfo in `repmgr.nodes` (or the one that the source lists), so
+  your program must be able to reach the nodes at those addresses. That is usually no problem inside a private network (or a docker overlay network
   etc.) where every node is available through its hostname. Overrides can change any setting, but they are the
   same for all nodes, so they can't map each node to a different address.
 * `Primary()` and `Nearest()` are as old as the last check. A node can fail between two checks, so you still have
@@ -274,7 +308,8 @@ There are other ways to reach the primary of a PostgreSQL cluster:
   them at random.
 
 pgxrepmgr is for programs that use pgx and a repmgr cluster. It reads the node list from `repmgr.nodes`, so new
-nodes are used and removed nodes are dropped without configuration. It knows which nodes are available before
+nodes are used and removed nodes are dropped without configuration. Without repmgr, it can take the list from
+another source, such as a cluster manager. It knows which nodes are available before
 your program needs one, uses the timeline to ignore an old primary after a failover, picks the nearest node
 by latency and replication lag, and gives you pgx pools that follow the primary. It needs no extra servers, and
 your connections go straight to the database.
@@ -282,13 +317,15 @@ your connections go straight to the database.
 ## Testing
 
 `go test ./...` runs the unit tests, which need no database. `testenv/` has a three-node PostgreSQL 17 cluster
-with repmgr 5.5 and automatic failover in docker, and integration tests that use it (on Linux):
+with repmgr 5.5 and automatic failover in docker, a second three-node cluster with plain streaming replication
+and no repmgr, and integration tests that use them (on Linux):
 
 ```sh
-# Run the integration tests. They start the cluster if needed.
+# Run the integration tests. They start the clusters if needed.
 go test -tags integration -v ./testenv
-# List the commands that control the cluster
+# List the commands that control the repmgr cluster, and the cluster without repmgr
 testenv/cluster.sh
+testenv/plain.sh
 # Print every change of the primary and the nearest node
 go run ./testenv/watch -write
 ```

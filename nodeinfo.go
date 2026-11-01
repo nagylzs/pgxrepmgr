@@ -10,10 +10,11 @@ import (
 // the NodeInfo that Primary, Nearest and the WaitFor methods return when there is no node.
 const InvalidNodeID = math.MinInt32
 
-// NodeInfo is a node of a repmgr cluster: its row in repmgr.nodes, and what the connector found
-// when it last checked the node.
+// NodeInfo is a node of the cluster: its row in repmgr.nodes (or what a NodeSource listed), and what
+// the connector found when it last checked the node.
 type NodeInfo struct {
-	// The node's own row in repmgr.nodes
+	// The node's own row in repmgr.nodes. With a NodeSource, only NodeID,
+	// NodeName, Location and ConnInfo are set, and Active is true.
 	NodeID         int
 	UpstreamNodeID *int
 	Active         bool
@@ -26,11 +27,11 @@ type NodeInfo struct {
 	SlotName       string
 	ConfigFile     string
 
-	// The node claims to be the primary: its own row says so, and it is
-	// writable
+	// The node claims to be the primary: it is writable, and its own row
+	// says so (with a NodeSource: it is writable)
 	IsPrimary bool
 	// The node can be used: it answered, and its own row in repmgr.nodes
-	// is active
+	// is active (with a NodeSource: it answered)
 	Avail bool
 	// The node is in recovery (a standby)
 	InRecovery bool

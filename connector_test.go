@@ -310,4 +310,14 @@ func TestOptionsCopyOverrides(t *testing.T) {
 	if o := (Options{}).WithAppOverride("dbname", "app"); o.AppOverrides["dbname"] != "app" {
 		t.Errorf("WithAppOverride on Options{} didn't set the override")
 	}
+	if o := (Options{}).WithoutCheckOverride("dbname"); len(o.CheckOverrides) != 0 {
+		t.Errorf("WithoutCheckOverride on Options{} set overrides: %v", o.CheckOverrides)
+	}
+	without := base.WithoutCheckOverride("dbname")
+	if _, ok := without.CheckOverrides["dbname"]; ok || without.CheckOverrides["user"] != "repmgr" {
+		t.Errorf("WithoutCheckOverride(\"dbname\") gave %v, want only dbname removed", without.CheckOverrides)
+	}
+	if base.CheckOverrides["dbname"] != "repmgr" {
+		t.Errorf("WithoutCheckOverride changed the original Options")
+	}
 }
