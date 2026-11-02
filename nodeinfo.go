@@ -31,7 +31,8 @@ type NodeInfo struct {
 	// says so (with a NodeSource: it is writable)
 	IsPrimary bool
 	// The node can be used: it answered, and its own row in repmgr.nodes
-	// is active (with a NodeSource: it answered)
+	// is active (with a NodeSource: it answered, with the Node's SystemID
+	// if that is set)
 	Avail bool
 	// The node is in recovery (a standby)
 	InRecovery bool

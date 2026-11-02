@@ -18,6 +18,16 @@ type Node struct {
 	ConnInfo string
 	// Location becomes NodeInfo.Location. It is optional.
 	Location string
+	// SystemID is the system identifier of the cluster that the node
+	// belongs to, as select system_identifier from pg_control_system()
+	// returns it (a bigint, so it can be negative). It is optional. If it
+	// is not 0, the connector checks it, and a node that reports another
+	// one is not available, and its LastError wraps ErrSystemIDMismatch.
+	// Use it when a node of another cluster could show up in the list or
+	// at a listed address, for example the old cluster after pg_upgrade:
+	// the upgraded cluster starts on timeline 1, so a primary of the old
+	// cluster would win by its higher timeline.
+	SystemID int64
 }
 
 // NodeSource lists the nodes of the cluster, for a Connector made with NewConnectorWithSource. Use it

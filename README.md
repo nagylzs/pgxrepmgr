@@ -264,7 +264,14 @@ rc := pgxrepmgr.NewConnectorWithSource(opts, src)
 * A node that is no longer listed is removed right away, and `Pool` closes its pool.
 * In the `NodeInfo` of a listed node, `NodeID`, `NodeName`, `Location` and `ConnInfo` come from the list,
   `Active` is true, and the other fields of the `repmgr.nodes` row are empty.
-* Checking a node needs no special privileges, so any user that can connect will do.
+* `Node.SystemID` is optional. If it is not 0, the connector also reads the node's system identifier, and a node
+  that reports another one is not available: its `LastError` wraps `ErrSystemIDMismatch`. Set it when a node of
+  another cluster could show up in the list or at a listed address, for example the old cluster after
+  `pg_upgrade`. The upgraded cluster starts on timeline 1, so if a primary of the old cluster ran again, it would
+  win by its higher timeline. Use the value that `select system_identifier from pg_control_system()` returns on
+  the cluster's nodes. It is a `bigint`, so it can be negative.
+* Checking a node needs no special privileges, so any user that can connect will do. By default, any user can
+  call `pg_control_system()` too.
 
 ## Connection strings
 
@@ -318,7 +325,8 @@ your connections go straight to the database.
 
 `go test ./...` runs the unit tests, which need no database. `testenv/` has a three-node PostgreSQL 17 cluster
 with repmgr 5.5 and automatic failover in docker, a second three-node cluster with plain streaming replication
-and no repmgr, and integration tests that use them (on Linux):
+and no repmgr (plus a separate node with another system identifier), and integration tests that use them (on
+Linux):
 
 ```sh
 # Run the integration tests. They start the clusters if needed.

@@ -20,6 +20,10 @@ var ErrNoPrimary = errors.New("pgxrepmgr: no primary is available")
 // ErrNoNode is the LastError of Connector.Nearest while no node is available.
 var ErrNoNode = errors.New("pgxrepmgr: no node is available")
 
+// ErrSystemIDMismatch is wrapped in the LastError of a node that a NodeSource listed with a
+// Node.SystemID, but that reports another system identifier, so it belongs to another cluster.
+var ErrSystemIDMismatch = errors.New("pgxrepmgr: the node belongs to another cluster")
+
 // IsNodeError reports whether err suggests that a node is gone, or is no longer what the connector
 // says it is: connecting failed, the connection was lost or timed out, the server is shutting down or
 // starting up, or it refused a write because it is in recovery. ErrNoPrimary and ErrNoNode count too,

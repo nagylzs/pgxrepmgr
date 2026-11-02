@@ -324,7 +324,7 @@ func (c *Connector) checkNode(ctx context.Context, nodeID int, dsn string) (res 
 	started = time.Now()
 	ctx3, cancel := context.WithTimeout(ctx, c.options.FetchTimeout)
 	defer cancel()
-	state, err := queryState(ctx3, conn)
+	state, err := queryState(ctx3, conn, false)
 	if err != nil {
 		res.Connected.LastError = err
 		c.logCheckError(ctx, err.Error())
@@ -416,31 +416,34 @@ type nodeState struct {
 	inRecovery bool
 	timeline   int   // the timeline the node writes WAL on, 0 in recovery
 	lsn        int64 // the WAL position in bytes (for a standby, up to where it has replayed), 0 if unknown
+	systemID   int64 // the system identifier, 0 if it wasn't read
 }
 
-// queryState reads the state of the node on conn.
-func queryState(ctx context.Context, conn *pgx.Conn) (nodeState, error) {
+// queryState reads the state of the node on conn. With withSystemID, it also reads the node's system
+// identifier.
+func queryState(ctx context.Context, conn *pgx.Conn, withSystemID bool) (nodeState, error) {
 	// Only a node that is not in recovery can be the primary. If more than one node claims to be
 	// the primary, the timeline tells which one was promoted last (see selectPrimary). The WAL
 	// position (for a standby, up to where it has replayed) tells how far behind the primary it is.
-	var inRecovery bool
+	var state nodeState
 	var walFile *string
 	var lsn *int64
-	err := conn.QueryRow(
-		ctx,
-		"select pg_is_in_recovery(), "+
-			"case when pg_is_in_recovery() then null else pg_walfile_name(pg_current_wal_lsn()) end, "+
-			"pg_wal_lsn_diff(case when pg_is_in_recovery() then pg_last_wal_replay_lsn() "+
-			"else pg_current_wal_lsn() end, '0/0')::bigint",
-	).Scan(&inRecovery, &walFile, &lsn)
-	if err != nil {
+	query := "select pg_is_in_recovery(), " +
+		"case when pg_is_in_recovery() then null else pg_walfile_name(pg_current_wal_lsn()) end, " +
+		"pg_wal_lsn_diff(case when pg_is_in_recovery() then pg_last_wal_replay_lsn() " +
+		"else pg_current_wal_lsn() end, '0/0')::bigint"
+	dest := []any{&state.inRecovery, &walFile, &lsn}
+	if withSystemID {
+		query += ", (pg_control_system()).system_identifier"
+		dest = append(dest, &state.systemID)
+	}
+	if err := conn.QueryRow(ctx, query).Scan(dest...); err != nil {
 		return nodeState{}, err
 	}
-	state := nodeState{inRecovery: inRecovery}
 	if walFile != nil {
 		// A WAL file name starts with its timeline ID as 8 hex digits.
 		var timeline uint32
-		if _, err = fmt.Sscanf(*walFile, "%8x", &timeline); err != nil {
+		if _, err := fmt.Sscanf(*walFile, "%8x", &timeline); err != nil {
 			return nodeState{}, fmt.Errorf("cannot parse WAL file name %q: %w", *walFile, err)
 		}
 		state.timeline = int(timeline)
@@ -452,9 +455,12 @@ func queryState(ctx context.Context, conn *pgx.Conn) (nodeState, error) {
 }
 
 // checkListedNode checks a node that the source listed. The node is available if the connector can
-// connect to it and read its state, and it is the primary if it is not in recovery.
-func (c *Connector) checkListedNode(ctx context.Context, n NodeInfo) NodeInfo {
-	n.LastChecked = time.Now()
+// connect to it and read its state, and its system identifier is node.SystemID (when that is set). It
+// is the primary if it is not in recovery.
+func (c *Connector) checkListedNode(ctx context.Context, node Node) NodeInfo {
+	n := NodeInfo{
+		NodeID: node.ID, NodeName: node.Name, Location: node.Location, ConnInfo: node.ConnInfo,
+		Active: true, LastChecked: time.Now()}
 	conn, latency, err := c.connect(ctx, n.ConnInfo)
 	if err != nil {
 		n.LastError = err
@@ -467,7 +473,11 @@ func (c *Connector) checkListedNode(ctx context.Context, n NodeInfo) NodeInfo {
 	started := time.Now()
 	ctx3, cancel := context.WithTimeout(ctx, c.options.FetchTimeout)
 	defer cancel()
-	state, err := queryState(ctx3, conn)
+	state, err := queryState(ctx3, conn, node.SystemID != 0)
+	if err == nil && state.systemID != node.SystemID {
+		err = fmt.Errorf("%w: node %v (%v) has the system identifier %v, not %v",
+			ErrSystemIDMismatch, n.NodeID, n.NodeName, state.systemID, node.SystemID)
+	}
 	if err != nil {
 		n.LastError = err
 		c.logCheckError(ctx, err.Error())
@@ -481,7 +491,7 @@ func (c *Connector) checkListedNode(ctx context.Context, n NodeInfo) NodeInfo {
 }
 
 // checkListedNodes checks nodes in parallel, and returns the results in the same order.
-func (c *Connector) checkListedNodes(ctx context.Context, nodes []NodeInfo) []NodeInfo {
+func (c *Connector) checkListedNodes(ctx context.Context, nodes []Node) []NodeInfo {
 	results := make([]NodeInfo, len(nodes))
 	var wg sync.WaitGroup
 	for i, n := range nodes {
@@ -736,11 +746,8 @@ func (c *Connector) checkListed() (nodeInfos []NodeInfo, primaryIdx int, removed
 	ctx := c.ctx
 	list := c.sourceList(ctx)
 	listed := make(map[int]bool, len(list))
-	nodeInfos = make([]NodeInfo, 0, len(list))
 	for _, n := range list {
 		listed[n.ID] = true
-		nodeInfos = append(nodeInfos, NodeInfo{
-			NodeID: n.ID, NodeName: n.Name, Location: n.Location, ConnInfo: n.ConnInfo, Active: true})
 	}
 	c.mu.Lock()
 	for _, n := range c.nodes {
@@ -749,7 +756,7 @@ func (c *Connector) checkListed() (nodeInfos []NodeInfo, primaryIdx int, removed
 		}
 	}
 	c.mu.Unlock()
-	nodeInfos = c.checkListedNodes(ctx, nodeInfos)
+	nodeInfos = c.checkListedNodes(ctx, list)
 	if ctx.Err() != nil {
 		return nil, -1, nil, false
 	}

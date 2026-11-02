@@ -2,8 +2,9 @@
 # rather than docker compose directly.
 #
 # plain1 is the primary, and plain2 and plain3 stream from it. Nothing promotes a standby by itself:
-# the tests do that with pg_promote(). It uses the image of the repmgr cluster, with its own
-# entrypoint, on another subnet, so both clusters can run at the same time.
+# the tests do that with pg_promote(). other is a single node made by its own initdb, so it has
+# another system identifier, as a cluster after pg_upgrade would. It uses the image of the repmgr
+# cluster, with its own entrypoint, on another subnet, so both clusters can run at the same time.
 name: pgxrepmgr-plain
 
 x-node: &node
@@ -48,6 +49,17 @@ services:
       NODE_NAME: plain3
       PRIMARY_HOST: 172.28.1.11
       NODE_HOST: 172.28.1.13
+
+  other:
+    <<: *node
+    hostname: other
+    networks:
+      plain:
+        ipv4_address: 172.28.1.21
+    environment:
+      NODE_NAME: other
+      PRIMARY_HOST: 172.28.1.21
+      NODE_HOST: 172.28.1.21
 
 networks:
   plain:
