@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"os/exec"
 	"slices"
 	"strings"
@@ -103,6 +104,73 @@ func TestSourceSystemID(t *testing.T) {
 	if node, err := insert(ctx, pool); err != nil || node != "other" {
 		t.Errorf("the write went to %q (error %v), want other", node, err)
 	}
+}
+
+// A node that accepts connections and never answers, like one whose machine is switched off, holds
+// every check up for ConnectTimeout. A standby that has just been promoted is on a higher timeline than
+// any primary before it, so the connector makes it the primary as soon as it has answered, and Refresh
+// looks at the nodes that have answered again, without waiting for the check to end.
+func TestSourcePromotionBesideHangingNode(t *testing.T) {
+	plain(t, "up")
+	hanging := pgxrepmgr.Node{ID: 9, Name: "hanging", ConnInfo: hangingServer(t) + " user=app dbname=app sslmode=disable"}
+	src := &listSource{nodes: []pgxrepmgr.Node{plainNodes[0], plainNodes[1], hanging}}
+	rc := pgxrepmgr.NewConnectorWithSource(plainOptions(t).WithConnectTimeout(10*time.Second), src)
+	t.Cleanup(rc.Close)
+	waitForPrimary(t, rc, "plain1")
+
+	plain(t, "promote", "plain2")
+	promoted := time.Now()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = rc.Refresh(ctx) }()
+	for rc.Primary().NodeName != "plain2" {
+		if time.Since(promoted) > 25*time.Second {
+			t.Fatalf("the primary is %q 25s after plain2 was promoted", rc.Primary().NodeName)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	took := time.Since(promoted)
+	t.Logf("plain2 is the primary %v after its promotion", took.Round(10*time.Millisecond))
+	if took > 2*time.Second {
+		t.Errorf("the connector took %v to make plain2 the primary", took.Round(100*time.Millisecond))
+	}
+	for _, n := range rc.Nodes() {
+		if n.NodeName == "plain1" && n.Avail {
+			t.Errorf("plain1 is available beside the promoted plain2")
+		}
+	}
+}
+
+// hangingServer accepts connections but never answers. It returns the host and the port of it, as a
+// part of a connection string.
+func hangingServer(t *testing.T) string {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	t.Cleanup(func() {
+		ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range conns {
+			conn.Close()
+		}
+	})
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
+		}
+	}()
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+	return "host=" + host + " port=" + port
 }
 
 // systemID returns the system identifier of the node at connInfo.

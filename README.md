@@ -36,6 +36,12 @@ another source. It is tested with PostgreSQL 17 and repmgr 5.5.
   example when it was cut off from the other nodes. A promotion always moves a node to a new, higher timeline, so
   the node on the highest timeline wins. The other nodes that claim to be primary get `Avail=false`, so they are
   not used for reading either, and their `LastError` explains why.
+* A node that accepts connections and never answers, like one whose machine is switched off, holds a check up for
+  `ConnectTimeout`. A node that has just been promoted doesn't wait for that: it is on a higher timeline than any
+  primary that the connector has seen, so the connector makes it the primary as soon as it has answered, and the
+  nodes that haven't answered yet are unavailable until the check ends. A `Refresh` during such a check makes it
+  look at the nodes that have answered again. Before the connector has seen a primary, it waits for the check,
+  because an old primary could answer first.
 * The nearest node can be a standby that is behind the primary. Each check measures how far behind each node is,
   in bytes of WAL that it has yet to replay (`NodeInfo.LagBytes`). With `Options.WithMaxLagBytes(n)`, `Nearest()`
   skips the standbys that are more than `n` bytes behind, for example because their replication has stopped. The

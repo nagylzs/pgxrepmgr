@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/teivah/broadcast"
 )
 
 // closedPort is a seed where nothing listens, so that checks fail right away.
@@ -319,5 +321,45 @@ func TestOptionsCopyOverrides(t *testing.T) {
 	}
 	if base.CheckOverrides["dbname"] != "repmgr" {
 		t.Errorf("WithoutCheckOverride changed the original Options")
+	}
+}
+
+// While a check waits for slow nodes, a primary on a higher timeline than any before is the primary at
+// once, and the nodes that haven't answered are unavailable. Before the first primary, or on a timeline
+// that has been seen, the connector waits for the check.
+func TestPublishEarly(t *testing.T) {
+	c := &Connector{relay: broadcast.NewRelay[struct{}](), nearestIdx: -1, primaryIdx: -1,
+		options: NewOptions("", "").WithLogger(slog.New(slog.DiscardHandler))}
+	old := NodeInfo{NodeID: 1, NodeName: "a", ConnInfo: "host=a", Avail: true, IsPrimary: true, Timeline: 3}
+	promoted := NodeInfo{NodeID: 2, NodeName: "b", ConnInfo: "host=b", Avail: true, IsPrimary: true, Timeline: 4}
+	pending := notAnswered(NodeInfo{NodeID: 3, NodeName: "c", ConnInfo: "host=c"})
+	if c.publishEarly([]NodeInfo{promoted, pending}) {
+		t.Error("published before the first primary")
+	}
+	c.highestTimeline = 4
+	if c.publishEarly([]NodeInfo{promoted, pending}) {
+		t.Error("published a primary on a timeline that has been seen")
+	}
+	c.highestTimeline = 3
+	if !c.publishEarly([]NodeInfo{old, promoted, pending}) {
+		t.Fatal("didn't publish the promoted node")
+	}
+	if p := c.Primary(); p.NodeName != "b" || !p.Avail {
+		t.Errorf("the primary is %+v, want b", p)
+	}
+	if c.highestTimeline != 4 {
+		t.Errorf("the highest timeline is %d, want 4", c.highestTimeline)
+	}
+	for _, n := range c.Nodes() {
+		switch n.NodeName {
+		case "a":
+			if n.Avail || n.LastError == nil || !strings.Contains(n.LastError.Error(), "split brain") {
+				t.Errorf("a: Avail=%v LastError=%v, want a split brain error", n.Avail, n.LastError)
+			}
+		case "c":
+			if n.Avail || !errors.Is(n.LastError, errNotAnswered) {
+				t.Errorf("c: Avail=%v LastError=%v, want errNotAnswered", n.Avail, n.LastError)
+			}
+		}
 	}
 }

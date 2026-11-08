@@ -34,10 +34,14 @@ type Connector struct {
 	cancel         context.CancelFunc
 	done           chan struct{} // closed when run has returned
 	refresh        chan struct{} // holds a token while a Refresh call waits for the next check to start
+	refreshing     chan struct{} // receives a value at a Refresh call, so that a check in progress looks again
 	closed         bool
 	checksStarted  int
 	checksFinished int
 	removals       int // how many checks removed nodes from nodes (see Pool.GetPool)
+	// highestTimeline is the highest timeline that a primary has been seen on, 0 before the first one
+	// (see publishEarly)
+	highestTimeline int
 }
 
 // NewConnector monitors a PostgreSQL repmgr cluster, and provides access to its nodes. It discovers
@@ -116,8 +120,9 @@ func start(opt Options, initial []NodeInfo, src NodeSource) *Connector {
 		nearestIdx: -1,
 		primaryIdx: -1,
 
-		done:    make(chan struct{}),
-		refresh: make(chan struct{}, 1),
+		done:       make(chan struct{}),
+		refresh:    make(chan struct{}, 1),
+		refreshing: make(chan struct{}, 1),
 	}
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	go c.run()
@@ -148,6 +153,10 @@ func (c *Connector) Refresh(ctx context.Context) error {
 	select {
 	case c.refresh <- struct{}{}:
 	default: // the next check is requested already
+	}
+	select {
+	case c.refreshing <- struct{}{}:
+	default:
 	}
 	c.mu.Unlock()
 	for {
@@ -492,38 +501,123 @@ func (c *Connector) checkListedNode(ctx context.Context, node Node) NodeInfo {
 
 // checkListedNodes checks nodes in parallel, and returns the results in the same order.
 func (c *Connector) checkListedNodes(ctx context.Context, nodes []Node) []NodeInfo {
-	results := make([]NodeInfo, len(nodes))
-	var wg sync.WaitGroup
-	for i, n := range nodes {
-		wg.Go(func() { results[i] = c.checkListedNode(ctx, n) })
+	return collect(c, ctx, len(nodes), true,
+		func(i int) NodeInfo { return c.checkListedNode(ctx, nodes[i]) },
+		func(n NodeInfo) NodeInfo { return n },
+		func(i int) NodeInfo {
+			n := nodes[i]
+			return notAnswered(NodeInfo{NodeID: n.ID, NodeName: n.Name, Location: n.Location, ConnInfo: n.ConnInfo, Active: true})
+		})
+}
+
+// collectInfos checks the nodes in src in parallel, and returns the results in the same order. With
+// early, it can make a node that has just been promoted the primary before the check ends (see
+// collect); src must then be the nodes of the last check.
+func (c *Connector) collectInfos(ctx context.Context, src []NodeInfo, early bool) []checkNodeResult {
+	return collect(c, ctx, len(src), early,
+		func(i int) checkNodeResult { return c.checkNode(ctx, src[i].NodeID, src[i].ConnInfo) },
+		func(r checkNodeResult) NodeInfo { return r.Connected },
+		func(i int) NodeInfo { return notAnswered(src[i]) })
+}
+
+// errNotAnswered is the LastError of a node whose check hasn't ended yet, when the connector makes a
+// node the primary before that (see publishEarly).
+var errNotAnswered = errors.New("the node hasn't answered the check yet")
+
+// notAnswered returns n as a node that hasn't answered the check yet.
+func notAnswered(n NodeInfo) NodeInfo {
+	n.Avail, n.IsPrimary, n.LastError = false, false, errNotAnswered
+	return n
+}
+
+// collect runs check for each of n nodes in parallel, and returns the results in the order of the
+// nodes. A node that accepts connections and never answers, like one whose machine is switched off,
+// holds the check up for ConnectTimeout. With early, collect doesn't keep a node that has just been
+// promoted from the callers meanwhile: after each answer, publishEarly gets the nodes so far, info of
+// the results and pending of the nodes that haven't answered. And when Refresh is called, it checks the
+// nodes that have answered again, because one of them may have been promoted since.
+func collect[T any](c *Connector, ctx context.Context, n int, early bool,
+	check func(int) T, info func(T) NodeInfo, pending func(int) NodeInfo) []T {
+	type answer struct {
+		idx int
+		res T
 	}
-	wg.Wait()
+	results := make([]T, n)
+	answered := make([]bool, n)
+	busy := make([]bool, n)
+	answers := make(chan answer, n)
+	start := func(i int) {
+		busy[i] = true
+		go func() { answers <- answer{i, check(i)} }()
+	}
+	for i := range n {
+		start(i)
+	}
+	waiting, inFlight := n, n
+	for inFlight > 0 {
+		select {
+		case a := <-answers:
+			inFlight--
+			busy[a.idx] = false
+			results[a.idx] = a.res
+			if !answered[a.idx] {
+				answered[a.idx] = true
+				waiting--
+			}
+		case <-c.refreshing:
+			if early && waiting > 0 {
+				for i := range n {
+					if answered[i] && !busy[i] {
+						start(i)
+						inFlight++
+					}
+				}
+			}
+			continue
+		}
+		if early && waiting > 0 && ctx.Err() == nil {
+			nodes := make([]NodeInfo, n)
+			for i := range n {
+				if answered[i] {
+					nodes[i] = info(results[i])
+				} else {
+					nodes[i] = pending(i)
+				}
+			}
+			c.publishEarly(nodes)
+		}
+	}
 	return results
 }
 
-func (c *Connector) collectInfos(ctx context.Context, src []NodeInfo) []checkNodeResult {
-	// We will check them in parallel
-	ci := make(chan checkNodeResult, len(src))
-	wg := sync.WaitGroup{}
-	wg.Add(len(src))
-	for _, n := range src {
-		nid, coni := n.NodeID, n.ConnInfo
-		go func() {
-			ci <- c.checkNode(ctx, nid, coni)
-			wg.Done()
-		}()
+// publishEarly makes the primary of nodes, the results of a check that is still waiting for some
+// nodes, the primary at once, if it is on a higher timeline than any primary that the connector has
+// seen. Promotion always moves a node to a new, higher timeline, so it has just been promoted, and only
+// a node that has been promoted even later could be the primary instead. The nodes that haven't
+// answered count as unavailable until the check ends. Before the first primary, it waits for the
+// check, because an old primary could answer first. It reports whether it changed the primary.
+func (c *Connector) publishEarly(nodes []NodeInfo) bool {
+	best := bestPrimary(nodes)
+	c.mu.Lock()
+	highest := c.highestTimeline
+	c.mu.Unlock()
+	if best < 0 || highest == 0 || nodes[best].Timeline <= highest {
+		return false
 	}
-	// close the channel when we got all infos
-	go func() {
-		wg.Wait()
-		close(ci)
-	}()
-	// collect the results
-	results := make([]checkNodeResult, 0)
-	for di := range ci {
-		results = append(results, di)
+	primaryIdx := c.selectPrimary(nodes)
+	setLag(nodes, primaryIdx)
+	nearestIdx := selectNearest(nodes, primaryIdx, c.options.MaxLagBytes)
+	c.mu.Lock()
+	prevPrimary := c.primaryNoLock()
+	c.nodes, c.nearestIdx, c.primaryIdx = nodes, nearestIdx, primaryIdx
+	c.highestTimeline = nodes[primaryIdx].Timeline
+	primary := c.primaryNoLock()
+	c.mu.Unlock()
+	c.relay.Broadcast(struct{}{})
+	if prevPrimary.NodeID != primary.NodeID {
+		c.Logger().Warn("Primary changed", "node", primary.String())
 	}
-	return results
+	return true
 }
 
 // selectPrimary returns the index of the primary in nodes, or -1 if there is none.
@@ -534,18 +628,7 @@ func (c *Connector) collectInfos(ctx context.Context, src []NodeInfo) []checkNod
 // on the highest timeline wins. The other nodes are marked unavailable: their data has diverged, so
 // they must not be used for reading either.
 func (c *Connector) selectPrimary(nodes []NodeInfo) int {
-	primaryIdx := -1
-	for idx, n := range nodes {
-		if !n.Avail || !n.IsPrimary {
-			continue
-		}
-		// The node ID only breaks a tie (two standbys promoted from the same timeline), so that the
-		// choice doesn't depend on the order in which the checks finished.
-		if primaryIdx < 0 || n.Timeline > nodes[primaryIdx].Timeline ||
-			n.Timeline == nodes[primaryIdx].Timeline && n.NodeID < nodes[primaryIdx].NodeID {
-			primaryIdx = idx
-		}
-	}
+	primaryIdx := bestPrimary(nodes)
 	if primaryIdx < 0 {
 		return -1
 	}
@@ -560,6 +643,24 @@ func (c *Connector) selectPrimary(nodes []NodeInfo) int {
 			"split brain: node %v (%v) on timeline %v claims to be primary, but node %v (%v) on timeline %v is the primary",
 			n.NodeID, n.NodeName, n.Timeline, primary.NodeID, primary.NodeName, primary.Timeline)
 		c.Logger().Error(n.LastError.Error())
+	}
+	return primaryIdx
+}
+
+// bestPrimary returns the index of the available node that claims to be the primary on the highest
+// timeline, or -1 if there is none.
+func bestPrimary(nodes []NodeInfo) int {
+	primaryIdx := -1
+	for idx, n := range nodes {
+		if !n.Avail || !n.IsPrimary {
+			continue
+		}
+		// The node ID only breaks a tie (two standbys promoted from the same timeline), so that the
+		// choice doesn't depend on the order in which the checks finished.
+		if primaryIdx < 0 || n.Timeline > nodes[primaryIdx].Timeline ||
+			n.Timeline == nodes[primaryIdx].Timeline && n.NodeID < nodes[primaryIdx].NodeID {
+			primaryIdx = idx
+		}
 	}
 	return primaryIdx
 }
@@ -637,6 +738,10 @@ func (c *Connector) run() {
 		case <-c.refresh:
 		default:
 		}
+		select {
+		case <-c.refreshing:
+		default:
+		}
 		c.mu.Unlock()
 		if !c.check() || !c.wait(started) {
 			return
@@ -686,9 +791,9 @@ func (c *Connector) checkRepmgr() (nodeInfos []NodeInfo, primaryIdx int, removed
 	// Go over dsns, extract infos
 	var results []checkNodeResult
 	if initialScanComplete {
-		results = c.collectInfos(ctx, prevNodeInfos)
+		results = c.collectInfos(ctx, prevNodeInfos, true)
 	} else {
-		results = c.collectInfos(ctx, initial)
+		results = c.collectInfos(ctx, initial, false)
 	}
 
 	// Create a map of the results
@@ -717,10 +822,10 @@ func (c *Connector) checkRepmgr() (nodeInfos []NodeInfo, primaryIdx int, removed
 	if len(newNodes) > 0 {
 		if initialScanComplete {
 			// initial scan completed, all results contain valid node ids
-			results = append(results, c.collectInfos(ctx, newNodes)...)
+			results = append(results, c.collectInfos(ctx, newNodes, false)...)
 		} else {
 			// initial scan is not yet complete, we drop items with node ids and keep the real ones only
-			results = c.collectInfos(ctx, newNodes)
+			results = c.collectInfos(ctx, newNodes, false)
 		}
 	}
 	if ctx.Err() != nil {
@@ -804,6 +909,9 @@ func (c *Connector) check() bool {
 	prevPrimary, prevNearest := c.primaryNoLock(), c.nearestNoLock()
 	c.nodes, c.nearestIdx, c.primaryIdx = nodeInfos, nearestIdx, primaryIdx
 	primary, nearest := c.primaryNoLock(), c.nearestNoLock()
+	if primary.Avail && primary.Timeline > c.highestTimeline {
+		c.highestTimeline = primary.Timeline
+	}
 	if nearestIdx >= 0 {
 		c.initialScanComplete = true
 	}
